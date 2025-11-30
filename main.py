@@ -1,4 +1,4 @@
-# bot_assistant_api_fixed.py — Совместимо с PTB 20.8
+# bot_assistant_api_fixed.py — версия для PTB 20+
 import os
 import logging
 import html
@@ -7,11 +7,11 @@ from typing import Optional
 
 # ───── ПРОВЕРКА ВЕРСИИ PYTHON-TELEGRAM-BOT ─────
 import telegram
-print("PTB version:", telegram.__version__)  # ← для проверки версии
+print("PTB version:", telegram.__version__)  # для отладки
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,  # ❌ раньше был Updater, теперь ApplicationBuilder
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
@@ -75,12 +75,22 @@ async def generate_document(user_text: str, service: str) -> Optional[str]:
                     f"Ситуация пользователя:\n{user_text}"
                 )
             )
-            return getattr(resp, "output_text", None) or str(resp).strip()
+            if hasattr(resp, "output_text"):
+                return resp.output_text.strip()
+            try:
+                return str(resp.get("output_text") or resp.get("output") or "").strip()
+            except Exception:
+                return str(resp).strip()
         except Exception as e:
             logger.exception("Assistant API sync call failed")
-            return None
+            raise
 
-    return await asyncio.to_thread(sync_call)
+    try:
+        result = await asyncio.to_thread(sync_call)
+        return result
+    except Exception as e:
+        logger.error("Ошибка при вызове Assistant API: %s", e)
+        return None
 
 # ───── Хэндлеры бота ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -119,26 +129,42 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     safe_doc = html.escape(document)
-    await msg.edit_message_text(
-        f"<b>ГОТОВО!</b>\n\n"
-        f"<b>{document_templates[service]['name']}</b> — {document_templates[service]['price']} ₽\n\n"
-        f"{safe_doc}\n\n"
-        f"<b>Оплата:</b>\n"
-        f"Карта Т-Банк: <code>2200 7007 0401 2581</code>\n\n"
-        f"После оплаты пришлите чек — пришлю документ в Word + PDF",
-        parse_mode="HTML"
-    )
+    if len(document) > 4000:
+        filename = f"{service}_document.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(document)
+        await msg.delete()
+        await update.message.reply_document(open(filename, "rb"), filename=filename,
+                                            caption=f"{document_templates[service]['name']} — {document_templates[service]['price']} ₽\n\nОтправь оплату и пришли чек — пришлю Word+PDF.")
+        try:
+            os.remove(filename)
+        except Exception:
+            pass
+    else:
+        await msg.edit_message_text(
+            f"<b>ГОТОВО!</b>\n\n"
+            f"<b>{document_templates[service]['name']}</b> — {document_templates[service]['price']} ₽\n\n"
+            f"{safe_doc}\n\n"
+            f"<b>Оплата:</b>\n"
+            f"Карта Т-Банк: <code>2200 7007 0401 2581</code>\n\n"
+            f"После оплаты пришлите чек — пришлю документ в Word + PDF",
+            parse_mode="HTML"
+        )
 
-    context.user_data.clear()
+    context.user_data.pop("service", None)
 
-# ───── ЗАПУСК ─────
+# ───── ЗАПУСК БОТА ─────
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()  # PTB 20.8 — Updater не нужен
+    # ❌ старый Updater больше не используется
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
     logger.info("Бот с Assistant API запущен")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True)  # ✅ PTB 20+ работает без Updater
 
 if __name__ == "__main__":
     main()

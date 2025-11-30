@@ -1,2 +1,4 @@
 python-telegram-bot==20.8
-openai==1.51.0
+openai
+python-docx
+reportlab

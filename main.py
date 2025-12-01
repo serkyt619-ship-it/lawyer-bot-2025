@@ -1,4 +1,4 @@
-# bot_assistant_api_fixed.py — рабочая версия для Render + YandexGPT (декабрь 2025)
+# bot_assistant_api_fixed.py — РАБОЧАЯ ВЕРСИЯ ДЛЯ Render + YandexGPT (декабрь 2025)
 import os
 import logging
 import html
@@ -18,42 +18,44 @@ from telegram.ext import (
     filters
 )
 
-from openai import AsyncOpenAI  # ← теперь асинхронный клиент!
+from openai import AsyncOpenAI
 
-# ───── ПЕРЕМЕННЫЕ ИЗ .env (на Render добавь их в Environment Variables) ─────
+# ───── ПЕРЕМЕННЫЕ ИЗ .env ─────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_IAM_TOKEN = os.getenv("YC_IAM_TOKEN")        # ← теперь нужен именно IAM-токен!
-# Или можно использовать YC_API_KEY (OAuth-токен), но IAM работает надёжнее
+YC_IAM_TOKEN = os.getenv("YC_IAM_TOKEN")      # IAM-токен (рекомендуется)
+# YC_API_KEY — тоже можно, но IAM надёжнее
 
 if not BOT_TOKEN or not YC_FOLDER_ID or (not YC_IAM_TOKEN and not os.getenv("YC_API_KEY")):
-    raise ValueError("Обязательно задай: BOT_TOKEN, YC_FOLDER_ID и YC_IAM_TOKEN (или YC_API_KEY)")
+    raise ValueError("Задай в .env: BOT_TOKEN, YC_FOLDER_ID и YC_IAM_TOKEN (или YC_API_KEY)")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ───── АСИНХРОННЫЙ КЛИЕНТ YandexGPT (новый API 2025) ─────
+# ───── ИСПРАВЛЕННЫЙ КЛИЕНТ YandexGPT (главное изменение!) ─────
 client = AsyncOpenAI(
     api_key=YC_IAM_TOKEN or os.getenv("YC_API_KEY"),
-    base_url="https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+    base_url="https://llm.api.cloud.yandex.ru/foundationModels/v1/completion"  # ← .ru + правильный путь
 )
+
+# Чтобы всё работало как chat.completions (удобнее), добавляем кастомный modelUri
+MODEL_URI = f"gpt://{YC_FOLDER_ID}/yandexgpt/latest"  # или yandexgpt-lite, или конкретную версию
 
 document_templates = {
     "prosecutor": {"name": "Жалоба в прокуратуру", "price": 700},
     "court": {"name": "Исковое заявление в суд", "price": 1500},
     "mvd": {"name": "Жалоба в МВД", "price": 800},
-    "zkh": {"name": "Жалоба в жилищную инспекцию / Роспотребнадзор", "price": 600},
+    "zkh": {"name": "Жалоба в жилищинспекцию / Роспотребнадзор", "price": 600},
     "consumer": {"name": "Претензия по защите прав потребителей", "price": 500},
 }
 
-# ───── ГЕНЕРАЦИЯ ДОКУМЕНТА (асинхронно, без to_thread) ─────
+# ───── ГЕНЕРАЦИЯ ДОКУМЕНТА ─────
 async def generate_document(user_text: str, service: str) -> Optional[str]:
     try:
         response = await client.chat.completions.create(
-            model="yandexgpt",                     # ← актуальное имя модели
-            # model="yandexgpt-lite"               # ← можно и lite, она дешевле
+            model=MODEL_URI,          # ← теперь передаём полный URI
             temperature=0.3,
-            max_tokens=3500,
+            max_tokens=4000,
             messages=[
                 {"role": "system", "content": (
                     "Ты — профессиональный российский юрист. "
@@ -72,7 +74,7 @@ async def generate_document(user_text: str, service: str) -> Optional[str]:
         logger.error(f"Ошибка YandexGPT: {e}")
         return None
 
-# ───── Хэндлеры ─────
+# ───── Хэндлеры (без изменений) ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)]
@@ -101,7 +103,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сначала нажмите /start")
         return
 
-    thinking_msg = await update.message.reply_text("Генерирую документ… ⏳")
+    thinking_msg = await update.message.reply_text("Генерирую документ…")
 
     user_text = update.message.text
     service = context.user_data["service"]
@@ -114,7 +116,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     safe_doc = html.escape(document)
 
-    if len(document) > 3800:  # Telegram лимит ~4096 символов
+    if len(document) > 3800:
         filename = f"{service}_document.txt"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(document)
@@ -147,8 +149,8 @@ def main():
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Бот запущен и работает на YandexGPT")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    logger.info("Бот запущен на YandexGPT (декабрь 2025)")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()

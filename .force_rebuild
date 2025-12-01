@@ -1,4 +1,0 @@
-git add .
-git commit -m "PTB 20+ migration: removed Updater"
-git push origin main
-

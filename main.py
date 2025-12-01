@@ -1,17 +1,16 @@
-# bot_assistant_api_fixed.py — версия для PTB 20+
+# bot_assistant_api_fixed.py — рабочая версия для Render + YandexGPT (декабрь 2025)
 import os
 import logging
 import html
 import asyncio
 from typing import Optional
 
-# ───── ПРОВЕРКА ВЕРСИИ PYTHON-TELEGRAM-BOT ─────
 import telegram
-print("PTB version:", telegram.__version__)  # для отладки
+print("PTB version:", telegram.__version__)
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,  # ❌ раньше был Updater, теперь ApplicationBuilder
+    ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
@@ -19,26 +18,25 @@ from telegram.ext import (
     filters
 )
 
-from openai import OpenAI
+from openai import AsyncOpenAI  # ← теперь асинхронный клиент!
 
-# ───── ПЕРЕМЕННЫЕ ИЗ .env ─────
+# ───── ПЕРЕМЕННЫЕ ИЗ .env (на Render добавь их в Environment Variables) ─────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_API_KEY = os.getenv("YC_API_KEY")
+YC_IAM_TOKEN = os.getenv("YC_IAM_TOKEN")        # ← теперь нужен именно IAM-токен!
+# Или можно использовать YC_API_KEY (OAuth-токен), но IAM работает надёжнее
 
-if not all([BOT_TOKEN, YC_FOLDER_ID, YC_API_KEY]):
-    raise ValueError("Заполни в настройках: BOT_TOKEN, YC_FOLDER_ID, YC_API_KEY")
+if not BOT_TOKEN or not YC_FOLDER_ID or (not YC_IAM_TOKEN and not os.getenv("YC_API_KEY")):
+    raise ValueError("Обязательно задай: BOT_TOKEN, YC_FOLDER_ID и YC_IAM_TOKEN (или YC_API_KEY)")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ───── КЛИЕНТ ASSISTANT API ─────
-client = OpenAI(
-    api_key=YC_API_KEY,
-    base_url="https://llm.api.cloud.yandex.net/foundationModels/v1"
+# ───── АСИНХРОННЫЙ КЛИЕНТ YandexGPT (новый API 2025) ─────
+client = AsyncOpenAI(
+    api_key=YC_IAM_TOKEN or os.getenv("YC_API_KEY"),
+    base_url="https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 )
-
-VECTOR_STORE_IDS = []
 
 document_templates = {
     "prosecutor": {"name": "Жалоба в прокуратуру", "price": 700},
@@ -48,51 +46,33 @@ document_templates = {
     "consumer": {"name": "Претензия по защите прав потребителей", "price": 500},
 }
 
-# ───── ГЕНЕРАЦИЯ ДОКУМЕНТА ─────
+# ───── ГЕНЕРАЦИЯ ДОКУМЕНТА (асинхронно, без to_thread) ─────
 async def generate_document(user_text: str, service: str) -> Optional[str]:
-    def sync_call():
-        model = f"gpt://{YC_FOLDER_ID}/yandexgpt/rc"
-        tools = []
-        if VECTOR_STORE_IDS:
-            tools.append({
-                "type": "file_search",
-                "file_search": {"vector_store_ids": VECTOR_STORE_IDS}
-            })
-
-        try:
-            resp = client.responses.create(
-                model=model,
-                temperature=0.3,
-                max_output_tokens=3000,
-                instructions=(
+    try:
+        response = await client.chat.completions.create(
+            model="yandexgpt",                     # ← актуальное имя модели
+            # model="yandexgpt-lite"               # ← можно и lite, она дешевле
+            temperature=0.3,
+            max_tokens=3500,
+            messages=[
+                {"role": "system", "content": (
                     "Ты — профессиональный российский юрист. "
                     "Составляй ТОЛЬКО чистый текст юридического документа на русском языке. "
                     "Никаких пояснений, комментариев, вступлений и заключений — только сам документ."
-                ),
-                tools=tools or None,
-                input=(
+                )},
+                {"role": "user", "content": (
                     f"Составь документ: {document_templates[service]['name']}\n\n"
                     f"Ситуация пользователя:\n{user_text}"
-                )
-            )
-            if hasattr(resp, "output_text"):
-                return resp.output_text.strip()
-            try:
-                return str(resp.get("output_text") or resp.get("output") or "").strip()
-            except Exception:
-                return str(resp).strip()
-        except Exception as e:
-            logger.exception("Assistant API sync call failed")
-            raise
+                )}
+            ]
+        )
+        return response.choices[0].message.content.strip()
 
-    try:
-        result = await asyncio.to_thread(sync_call)
-        return result
     except Exception as e:
-        logger.error("Ошибка при вызове Assistant API: %s", e)
+        logger.error(f"Ошибка YandexGPT: {e}")
         return None
 
-# ───── Хэндлеры бота ─────
+# ───── Хэндлеры ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)]
@@ -108,6 +88,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     service = query.data
     context.user_data["service"] = service
+
     await query.edit_message_text(
         f"<b>{document_templates[service]['name']}</b>\n"
         f"Цена: {document_templates[service]['price']} ₽\n\n"
@@ -120,28 +101,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сначала нажмите /start")
         return
 
-    msg = await update.message.reply_text("Генерирую документ… немного времени займёт ⏳")
+    thinking_msg = await update.message.reply_text("Генерирую документ… ⏳")
+
     user_text = update.message.text
-    service = context.user_data.get("service")
+    service = context.user_data["service"]
+
     document = await generate_document(user_text, service)
+
     if not document:
-        await msg.edit_message_text("Ошибка связи с YandexGPT. Попробуйте позже или напишите /start")
+        await thinking_msg.edit_text("Ошибка связи с YandexGPT. Попробуйте позже или напишите /start")
         return
 
     safe_doc = html.escape(document)
-    if len(document) > 4000:
+
+    if len(document) > 3800:  # Telegram лимит ~4096 символов
         filename = f"{service}_document.txt"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(document)
-        await msg.delete()
-        await update.message.reply_document(open(filename, "rb"), filename=filename,
-                                            caption=f"{document_templates[service]['name']} — {document_templates[service]['price']} ₽\n\nОтправь оплату и пришли чек — пришлю Word+PDF.")
-        try:
-            os.remove(filename)
-        except Exception:
-            pass
+        await thinking_msg.delete()
+        await update.message.reply_document(
+            document=open(filename, "rb"),
+            filename=filename,
+            caption=f"{document_templates[service]['name']} — {document_templates[service]['price']} ₽\n\n"
+                    f"Отправь оплату и пришли чек — пришлю Word+PDF."
+        )
+        os.remove(filename)
     else:
-        await msg.edit_message_text(
+        await thinking_msg.edit_text(
             f"<b>ГОТОВО!</b>\n\n"
             f"<b>{document_templates[service]['name']}</b> — {document_templates[service]['price']} ₽\n\n"
             f"{safe_doc}\n\n"
@@ -153,18 +139,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop("service", None)
 
-# ───── ЗАПУСК БОТА ─────
+# ───── ЗАПУСК ─────
 def main():
-    # ❌ старый Updater больше не используется
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Бот с Assistant API запущен")
-    app.run_polling(drop_pending_updates=True)  # ✅ PTB 20+ работает без Updater
+    logger.info("Бот запущен и работает на YandexGPT")
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()

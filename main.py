@@ -1,4 +1,4 @@
-# main.py — финальная версия под Render Web Service + YC_API_KEY (декабрь 2025)
+# main.py — РАБОЧАЯ ВЕРСИЯ ДЛЯ RENDER (декабрь 2025)
 import os
 import logging
 import html
@@ -16,24 +16,24 @@ from telegram.ext import (
 
 from openai import AsyncOpenAI
 
-# ───── ПЕРЕМЕННЫЕ ИЗ .env (теперь только YC_API_KEY!) ─────
+# ───── ПЕРЕМЕННЫЕ ─────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_API_KEY = os.getenv("YC_API_KEY")          # ← теперь используем API-ключ
+YC_API_KEY = os.getenv("YC_API_KEY")
 
 if not all([BOT_TOKEN, YC_FOLDER_ID, YC_API_KEY]):
-    raise ValueError("Обязательно задай в Render: BOT_TOKEN, YC_FOLDER_ID и YC_API_KEY")
+    raise ValueError("Задай BOT_TOKEN, YC_FOLDER_ID и YC_API_KEY в Render!")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bot")
 
-# ───── YandexGPT клиент через API-ключ (официальный способ 2025) ─────
+# ───── YandexGPT ─────
 client = AsyncOpenAI(
-    api_key=YC_API_KEY,   # ← именно API-ключ, а не IAM-токен
+    api_key=YC_API_KEY,
     base_url="https://llm.api.cloud.yandex.ru/foundationModels/v1/completion"
 )
 
-MODEL_URI = f"gpt://{YC_FOLDER_ID}/yandexgpt/latest"   # можно yandexgpt-lite если хочешь дешевле
+MODEL_URI = f"gpt://{YC_FOLDER_ID}/yandexgpt/latest"
 
 document_templates = {
     "prosecutor": {"name": "Жалоба в прокуратуру", "price": 700},
@@ -50,7 +50,7 @@ async def generate_document(user_text: str, service: str) -> Optional[str]:
             temperature=0.3,
             max_tokens=4000,
             messages=[
-                {"role": "system", "content": "Ты — профессиональный российский юрист. Пиши ТОЛЬКО чистый текст юридического документа без пояснений и приветствий."},
+                {"role": "system", "content": "Ты — профессиональный российский юрист. Пиши ТОЛЬКО чистый текст юридического документа без пояснений."},
                 {"role": "user", "content": f"Составь: {document_templates[service]['name']}\n\nСитуация:\n{user_text}"}
             ]
         )
@@ -59,12 +59,12 @@ async def generate_document(user_text: str, service: str) -> Optional[str]:
         logger.error(f"Ошибка YandexGPT: {e}")
         return None
 
-# ───── Хэндлеры (без изменений) ─────
+# ───── Хэндлеры ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)]
                 for k, v in document_templates.items()]
     await update.message.reply_text(
-        "АВТОЮРИСТ 24/7\n\nВыберите нужный документ:",
+        "АВТОЮРИСТ 24/7\n\nВыберите документ:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -76,13 +76,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"<b>{document_templates[service]['name']}</b>\n"
         f"Цена: {document_templates[service]['price']} ₽\n\n"
-        f"Опишите вашу ситуацию максимально подробно:",
+        f"Опишите ситуацию подробно:",
         parse_mode="HTML"
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "service" not in context.user_data:
-        await update.message.reply_text("Сначала нажмите /start")
+        await update.message.reply_text("Нажмите /start")
         return
 
     thinking = await update.message.reply_text("Генерирую документ…")
@@ -102,7 +102,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_document(
             open("doc.txt", "rb"),
             filename="документ.txt",
-            caption=f"{document_templates[context.user_data['service']]['name']} готов!\n\nОплата: 2200 7007 0401 2581 (Т-Банк)"
+            caption=f"{document_templates[context.user_data['service']]['name']} готов!\n\nОплата: 2200 7007 0401 2581"
         )
         os.remove("doc.txt")
     else:
@@ -111,13 +111,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>{document_templates[context.user_data['service']]['name']}</b>\n\n"
             f"{safe_doc}\n\n"
             f"<b>Оплата:</b> <code>2200 7007 0401 2581</code>\n"
-            f"Пришлите чек — сразу вышлю Word + PDF",
+            f"Чек → Word + PDF сразу",
             parse_mode="HTML"
         )
 
     context.user_data.clear()
 
-# ───── ЗАПУСК ЧЕРЕЗ WEBHOOK (идеально для Render Web Service) ─────
+# ───── ГЛАВНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ─────
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -126,7 +126,10 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     port = int(os.environ.get("PORT", 10000))
-    webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}.onrender.com/{BOT_TOKEN}"
+
+    # ← ЭТО ПРАВИЛЬНЫЙ СПОСОБ НА RENDER (без двойного .onrender.com)
+    hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME") or os.environ["RENDER_SERVICE_NAME"]
+    webhook_url = f"https://{hostname}.onrender.com/{BOT_TOKEN}"
 
     logger.info(f"Бот запущен на webhook: {webhook_url}")
 

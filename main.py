@@ -24,13 +24,14 @@ logger = logging.getLogger("bot")
 
 # Переменные из Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
 YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")
 YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # PEM ключ
 YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")
 
-if not all([BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
+if not all([BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
     raise ValueError(
-        "Задайте BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!"
+        "Задайте BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!"
     )
 
 # Шаблоны документов
@@ -87,8 +88,11 @@ async def generate_document(user_text: str, service: str) -> str | None:
         iam_token = get_iam_token()
         client = AsyncOpenAI(api_key=iam_token, base_url="https://llm.api.cloud.yandex.net/v1")
 
+        # Правильный URI модели
+        model_uri = f"models/{YC_FOLDER_ID}/yandexgpt-5-pro"
+
         response = await client.chat.completions.create(
-            model="yandexgpt-5-pro",
+            model=model_uri,
             messages=[
                 {
                     "role": "system",

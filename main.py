@@ -1,4 +1,5 @@
-# main.py — РАБОЧАЯ ВЕРСИЯ ДЛЯ RENDER (декабрь 2025)
+# main.py — ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ РАБОЧАЯ ВЕРСИЯ ДЛЯ RENDER
+
 import os
 import logging
 import html
@@ -30,7 +31,7 @@ logger = logging.getLogger("bot")
 # ───── YandexGPT ─────
 client = AsyncOpenAI(
     api_key=YC_API_KEY,
-    base_url="https://llm.api.cloud.yandex.ru/foundationModels/v1/completion"
+    base_url="https://llm.api.cloud.yandex.ru/foundationModels/v1"
 )
 
 MODEL_URI = f"gpt://{YC_FOLDER_ID}/yandexgpt/latest"
@@ -50,8 +51,10 @@ async def generate_document(user_text: str, service: str) -> Optional[str]:
             temperature=0.3,
             max_tokens=4000,
             messages=[
-                {"role": "system", "content": "Ты — профессиональный российский юрист. Пиши ТОЛЬКО чистый текст юридического документа без пояснений."},
-                {"role": "user", "content": f"Составь: {document_templates[service]['name']}\n\nСитуация:\n{user_text}"}
+                {"role": "system",
+                 "content": "Ты — профессиональный российский юрист. Пиши ТОЛЬКО текст юридического документа."},
+                {"role": "user",
+                 "content": f"Составь: {document_templates[service]['name']}\n\nСитуация:\n{user_text}"}
             ]
         )
         return response.choices[0].message.content.strip()
@@ -59,10 +62,14 @@ async def generate_document(user_text: str, service: str) -> Optional[str]:
         logger.error(f"Ошибка YandexGPT: {e}")
         return None
 
-# ───── Хэндлеры ─────
+
+# ───── ХЭНДЛЕРЫ ─────
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)]
-                for k, v in document_templates.items()]
+    keyboard = [
+        [InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)]
+        for k, v in document_templates.items()
+    ]
     await update.message.reply_text(
         "АВТОЮРИСТ 24/7\n\nВыберите документ:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -71,8 +78,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     service = query.data
     context.user_data["service"] = service
+
     await query.edit_message_text(
         f"<b>{document_templates[service]['name']}</b>\n"
         f"Цена: {document_templates[service]['price']} ₽\n\n"
@@ -98,13 +107,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(document) > 3800:
         with open("doc.txt", "w", encoding="utf-8") as f:
             f.write(document)
+
         await thinking.delete()
+
         await update.message.reply_document(
             open("doc.txt", "rb"),
             filename="документ.txt",
             caption=f"{document_templates[context.user_data['service']]['name']} готов!\n\nОплата: 2200 7007 0401 2581"
         )
+
         os.remove("doc.txt")
+
     else:
         await thinking.edit_text(
             f"<b>ГОТОВО!</b>\n\n"
@@ -117,7 +130,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.clear()
 
-# ───── ГЛАВНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ─────
+
+# ───── ВАЖНОЕ: ПРАВИЛЬНАЯ НАСТРОЙКА WEBHOOK ДЛЯ RENDER ─────
+
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -127,9 +142,12 @@ def main():
 
     port = int(os.environ.get("PORT", 10000))
 
-    # ← ЭТО ПРАВИЛЬНЫЙ СПОСОБ НА RENDER (без двойного .onrender.com)
-    hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME") or os.environ["RENDER_SERVICE_NAME"]
-    webhook_url = f"https://{hostname}.onrender.com/{BOT_TOKEN}"
+    # ✔️ Render сам даёт правильный URL!
+    external_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not external_url:
+        raise ValueError("Переменная RENDER_EXTERNAL_URL отсутствует в Render!")
+
+    webhook_url = f"{external_url}/{BOT_TOKEN}"
 
     logger.info(f"Бот запущен на webhook: {webhook_url}")
 
@@ -139,6 +157,7 @@ def main():
         url_path=BOT_TOKEN,
         webhook_url=webhook_url
     )
+
 
 if __name__ == "__main__":
     main()

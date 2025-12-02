@@ -1,4 +1,4 @@
-# main.py — рабочая версия декабрь 2025 с PS256
+# main.py — рабочая версия декабрь 2025 с PS256 и правильным kid
 
 import os
 import logging
@@ -18,17 +18,18 @@ logger = logging.getLogger("bot")
 # Переменные из Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")  # ID сервиса
-YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # PEM-ключ
+YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")  # ID сервисного аккаунта
+YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # PEM ключ IAM
+YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")  # ID IAM-ключа (обязательно!)
 
-if not all([BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY]):
-    raise ValueError("Задай BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY в Render!")
+if not all([BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
+    raise ValueError("Задай BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!")
 
 # Генерация IAM-токена из PEM-ключа (PS256)
 def get_iam_token():
     now = int(time.time())
     payload = {
-        "iss": YC_SERVICE_ACCOUNT_ID,
+        "iss": YC_SERVICE_ACCOUNT_ID,  # сервисный аккаунт
         "aud": "https://iam.api.cloud.yandex.net/iam/v1/tokens",
         "iat": now,
         "exp": now + 3600
@@ -40,11 +41,12 @@ def get_iam_token():
         backend=default_backend()
     )
 
+    # Важно: kid — это ID IAM-ключа, а не сервисного аккаунта
     encoded_token = jwt.encode(
         payload,
         private_key_obj,
         algorithm="PS256",
-        headers={"typ": "JWT", "alg": "PS256", "kid": YC_SERVICE_ACCOUNT_ID}
+        headers={"typ": "JWT", "alg": "PS256", "kid": YC_IAM_KEY_ID}
     )
 
     response = requests.post(

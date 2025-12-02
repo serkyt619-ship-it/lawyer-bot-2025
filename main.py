@@ -16,26 +16,26 @@ logger = logging.getLogger("bot")
 # Переменные из Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")  # ID аккаунта: aje6jnkuvj6n1qqi1f0
+YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")  # Точный ID: aje6jnkuvj6n1qqi1f0 (из скриншота)
 YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # Твой PEM-ключ
 
 if not all([BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY]):
     raise ValueError("Задай BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY в Render!")
 
-# Генерация IAM-токена из PEM (работает всегда, токен обновляется автоматически)
+# Генерация IAM-токена из PEM-ключа (исправленный алгоритм RS256)
 def get_iam_token():
     now = int(time.time())
     payload = {
-        "aud": "https://iam.api.cloud.yandex.net/iam/v1/tokens",
         "iss": YC_SERVICE_ACCOUNT_ID,
+        "aud": "https://iam.api.cloud.yandex.net/iam/v1/tokens",
         "iat": now,
         "exp": now + 3600
     }
     encoded_token = jwt.encode(
         payload,
         YC_PRIVATE_KEY,
-        algorithm='PS256',
-        headers={'kid': YC_SERVICE_ACCOUNT_ID}
+        algorithm='RS256',  # ← ИСПРАВЛЕНО: RS256 вместо PS256
+        headers={'typ': 'JWT', 'alg': 'RS256', 'kid': YC_SERVICE_ACCOUNT_ID}
     )
     response = requests.post(
         "https://iam.api.cloud.yandex.net/iam/v1/tokens",
@@ -59,7 +59,7 @@ document_templates = {
     "consumer": {"name": "Претензия по защите прав потребителей", "price": 500},
 }
 
-async def generate_document(user_text: str, service: str) -> Optional[str]:
+async def generate_document(user_text: str, service: str) -> str | None:
     try:
         response = await client.chat.completions.create(
             model=f"gpt://{YC_FOLDER_ID}/yandexgpt/latest",

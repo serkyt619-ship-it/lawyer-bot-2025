@@ -1,7 +1,6 @@
-python-telegram-bot[webhooks]==21.9
 openai==1.2.0
-python-docx
-reportlab
-pyjwt
-requests
-cryptography
+httpx>=0.24.0,<0.31
+python-telegram-bot==21.9
+requests>=2.32.0
+pyjwt>=2.10.0
+cryptography>=46.0.0

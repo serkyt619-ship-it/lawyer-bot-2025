@@ -6,3 +6,4 @@ pyjwt==2.10.1
 cryptography==46.0.3
 anyio==3.7.1
 pydantic==2.12.5
+

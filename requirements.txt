@@ -1,6 +1,7 @@
 python-telegram-bot[webhooks]==21.9
-openai==1.2.0  # Обновил на свежую версию для совместимости с Yandex
+openai==1.2.0
 python-docx
 reportlab
 pyjwt
 requests
+cryptography

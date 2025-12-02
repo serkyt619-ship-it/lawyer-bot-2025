@@ -29,44 +29,9 @@ YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # PEM ключ
 YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")
 
 if not all([BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
-    raise ValueError("Задайте BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!")
-
-# Генерация IAM-токена из PEM-ключа (PS256)
-def get_iam_token() -> str:
-    now = int(time.time())
-    payload = {
-        "iss": YC_SERVICE_ACCOUNT_ID,
-        "aud": "https://iam.api.cloud.yandex.net/iam/v1/tokens",
-        "iat": now,
-        "exp": now + 3600
-    }
-
-    private_key_obj = serialization.load_pem_private_key(
-        YC_PRIVATE_KEY.encode(),
-        password=None,
-        backend=default_backend()
+    raise ValueError(
+        "Задайте BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!"
     )
-
-    encoded_token = jwt.encode(
-        payload,
-        private_key_obj,
-        algorithm="PS256",
-        headers={"typ": "JWT", "alg": "PS256", "kid": YC_IAM_KEY_ID}
-    )
-
-    response = requests.post(
-        "https://iam.api.cloud.yandex.net/iam/v1/tokens",
-        json={"jwt": encoded_token}
-    )
-    if response.status_code != 200:
-        raise ValueError(f"Ошибка генерации IAM-токена: {response.text}")
-    return response.json()["iamToken"]
-
-# Клиент YandexGPT 5.1 Pro
-client = AsyncOpenAI(
-    api_key=get_iam_token(),
-    base_url="https://llm.api.cloud.yandex.net/v1"
-)
 
 # Шаблоны документов
 document_templates = {
@@ -77,9 +42,51 @@ document_templates = {
     "consumer": {"name": "Претензия по защите прав потребителей", "price": 500},
 }
 
+# Генерация IAM-токена из PEM-ключа (PS256)
+def get_iam_token() -> str:
+    try:
+        now = int(time.time())
+        payload = {
+            "iss": YC_SERVICE_ACCOUNT_ID,
+            "aud": "https://iam.api.cloud.yandex.net/iam/v1/tokens",
+            "iat": now,
+            "exp": now + 3600
+        }
+
+        pem_key = YC_PRIVATE_KEY.replace("\\n", "\n").strip('"')
+
+        private_key_obj = serialization.load_pem_private_key(
+            pem_key.encode(),
+            password=None,
+            backend=default_backend()
+        )
+
+        encoded_token = jwt.encode(
+            payload,
+            private_key_obj,
+            algorithm="PS256",
+            headers={"typ": "JWT", "alg": "PS256", "kid": YC_IAM_KEY_ID}
+        )
+
+        response = requests.post(
+            "https://iam.api.cloud.yandex.net/iam/v1/tokens",
+            json={"jwt": encoded_token}
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Ошибка генерации IAM-токена: {response.text}")
+
+        return response.json()["iamToken"]
+
+    except Exception as e:
+        logger.error(f"Ошибка при генерации IAM-токена: {e}")
+        raise
+
 # Генерация документа через YandexGPT 5.1 Pro
 async def generate_document(user_text: str, service: str) -> str | None:
     try:
+        iam_token = get_iam_token()
+        client = AsyncOpenAI(api_key=iam_token, base_url="https://llm.api.cloud.yandex.net/v1")
+
         response = await client.chat.completions.create(
             model="yandexgpt-5-pro",
             messages=[
@@ -163,7 +170,6 @@ def main():
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Webhook Render
     webhook_url = f"https://lawyer-bot-2025.onrender.com/{BOT_TOKEN}"
     logger.info(f"Бот запущен на webhook: {webhook_url}")
 

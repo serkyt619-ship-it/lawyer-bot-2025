@@ -7,7 +7,14 @@ import time
 import jwt
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 from openai import AsyncOpenAI
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
@@ -18,14 +25,14 @@ logger = logging.getLogger("bot")
 # Переменные из Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")
-YC_PRIVATE_KEY = os.getenv("YC_API_KEY")
+YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # PEM ключ
 YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")
 
 if not all([BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
-    raise ValueError("Задай BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!")
+    raise ValueError("Задайте BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!")
 
 # Генерация IAM-токена из PEM-ключа (PS256)
-def get_iam_token():
+def get_iam_token() -> str:
     now = int(time.time())
     payload = {
         "iss": YC_SERVICE_ACCOUNT_ID,
@@ -74,10 +81,16 @@ document_templates = {
 async def generate_document(user_text: str, service: str) -> str | None:
     try:
         response = await client.chat.completions.create(
-            model="yandexgpt-5-pro",  # модель YandexGPT 5.1 Pro
+            model="yandexgpt-5-pro",
             messages=[
-                {"role": "system", "content": "Ты — профессиональный российский юрист. Пиши ТОЛЬКО готовый юридический документ, без объяснений."},
-                {"role": "user", "content": f"Составь документ: {document_templates[service]['name']}\n\nСитуация:\n{user_text}"}
+                {
+                    "role": "system",
+                    "content": "Ты — профессиональный российский юрист. Пиши ТОЛЬКО готовый юридический документ, без объяснений."
+                },
+                {
+                    "role": "user",
+                    "content": f"Составь документ: {document_templates[service]['name']}\n\nСитуация:\n{user_text}"
+                }
             ],
             temperature=0.3,
             max_tokens=4000,
@@ -89,7 +102,10 @@ async def generate_document(user_text: str, service: str) -> str | None:
 
 # /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)] for k, v in document_templates.items()]
+    keyboard = [
+        [InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)]
+        for k, v in document_templates.items()
+    ]
     await update.message.reply_text(
         "АВТОЮРИСТ 24/7\n\nВыберите тип документа:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -147,6 +163,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
+    # Webhook Render
     webhook_url = f"https://lawyer-bot-2025.onrender.com/{BOT_TOKEN}"
     logger.info(f"Бот запущен на webhook: {webhook_url}")
 

@@ -1,4 +1,4 @@
-# main.py — 100% РАБОЧАЯ ВЕРСИЯ, БЕЗ ОШИБОК (декабрь 2025)
+# main.py — рабочая версия декабрь 2025 с PS256
 
 import os
 import logging
@@ -9,6 +9,8 @@ import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from openai import AsyncOpenAI
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bot")
@@ -16,13 +18,13 @@ logger = logging.getLogger("bot")
 # Переменные из Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")  # Точный ID: aje6jnkuvj6n1qqi1f0 (из скриншота)
-YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # Твой PEM-ключ
+YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")  # ID сервиса
+YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # PEM-ключ
 
 if not all([BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY]):
     raise ValueError("Задай BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY в Render!")
 
-# Генерация IAM-токена из PEM-ключа (исправленный алгоритм RS256)
+# Генерация IAM-токена из PEM-ключа (PS256)
 def get_iam_token():
     now = int(time.time())
     payload = {
@@ -31,12 +33,20 @@ def get_iam_token():
         "iat": now,
         "exp": now + 3600
     }
+
+    private_key_obj = serialization.load_pem_private_key(
+        YC_PRIVATE_KEY.encode(),
+        password=None,
+        backend=default_backend()
+    )
+
     encoded_token = jwt.encode(
         payload,
-        YC_PRIVATE_KEY,
-        algorithm='RS256',  # ← ИСПРАВЛЕНО: RS256 вместо PS256
-        headers={'typ': 'JWT', 'alg': 'RS256', 'kid': YC_SERVICE_ACCOUNT_ID}
+        private_key_obj,
+        algorithm="PS256",
+        headers={"typ": "JWT", "alg": "PS256", "kid": YC_SERVICE_ACCOUNT_ID}
     )
+
     response = requests.post(
         "https://iam.api.cloud.yandex.net/iam/v1/tokens",
         json={"jwt": encoded_token}

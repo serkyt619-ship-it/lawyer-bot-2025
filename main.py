@@ -1,4 +1,4 @@
-# main.py — рабочая версия декабрь 2025 с PS256 и правильным kid
+# main.py — рабочая версия декабрь 2025 с PS256 и Chat Completions
 
 import os
 import logging
@@ -18,14 +18,14 @@ logger = logging.getLogger("bot")
 # Переменные из Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")
-YC_PRIVATE_KEY = os.getenv("YC_API_KEY")
-YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")
+YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")  # ID сервисного аккаунта
+YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # PEM ключ IAM
+YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")  # ID IAM-ключа
 
 if not all([BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
-    raise ValueError("Задай все переменные: BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID!")
+    raise ValueError("Задай BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!")
 
-# Генерация IAM-токена (PS256)
+# Генерация IAM-токена из PEM-ключа (PS256)
 def get_iam_token():
     now = int(time.time())
     payload = {
@@ -56,12 +56,13 @@ def get_iam_token():
         raise ValueError(f"Ошибка генерации IAM-токена: {response.text}")
     return response.json()["iamToken"]
 
-# Клиент YandexGPT
+# Клиент YandexGPT с IAM-токеном (Chat Completions)
 client = AsyncOpenAI(
     api_key=get_iam_token(),
-    base_url="https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+    base_url="https://llm.api.cloud.yandex.net/foundationModels/v1/chat/completions"
 )
 
+# Шаблоны документов
 document_templates = {
     "prosecutor": {"name": "Жалоба в прокуратуру", "price": 700},
     "court": {"name": "Исковое заявление в суд", "price": 1500},
@@ -70,6 +71,7 @@ document_templates = {
     "consumer": {"name": "Претензия по защите прав потребителей", "price": 500},
 }
 
+# Генерация документа через YandexGPT
 async def generate_document(user_text: str, service: str) -> str | None:
     try:
         response = await client.chat.completions.create(
@@ -86,20 +88,31 @@ async def generate_document(user_text: str, service: str) -> str | None:
         logger.error(f"Ошибка YandexGPT: {e}")
         return None
 
+# /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)] for k, v in document_templates.items()]
-    await update.message.reply_text("АВТОЮРИСТ 24/7\n\nВыберите тип документа:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [
+        [InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)]
+        for k, v in document_templates.items()
+    ]
+    await update.message.reply_text(
+        "АВТОЮРИСТ 24/7\n\nВыберите тип документа:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
+# Обработка нажатия кнопок
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     service = query.data
     context.user_data["service"] = service
     await query.edit_message_text(
-        f"<b>{document_templates[service]['name']}</b>\nЦена: {document_templates[service]['price']} ₽\n\nОпишите вашу ситуацию:",
+        f"<b>{document_templates[service]['name']}</b>\n"
+        f"Цена: {document_templates[service]['price']} ₽\n\n"
+        f"Опишите вашу ситуацию:",
         parse_mode="HTML"
     )
 
+# Обработка текстовых сообщений
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "service" not in context.user_data:
         await update.message.reply_text("Нажмите /start и выберите документ")
@@ -118,19 +131,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open("document.txt", "w", encoding="utf-8") as f:
             f.write(document)
         await thinking.delete()
-        await update.message.reply_document(open("document.txt", "rb"), filename="документ.txt",
-                                           caption=f"{document_templates[context.user_data['service']]['name']}\n\nОплата: 2200 7007 0401 2581")
+        await update.message.reply_document(
+            open("document.txt", "rb"),
+            filename="документ.txt",
+            caption=f"{document_templates[context.user_data['service']]['name']}\n\n"
+                    f"Оплата: 2200 7007 0401 2581"
+        )
         os.remove("document.txt")
     else:
         await thinking.edit_text(
-            f"<b>ГОТОВО!</b>\n\n<b>{document_templates[context.user_data['service']]['name']}</b>\n\n{safe_doc}\n\n<b>Оплата:</b> <code>2200 7007 0401 2581</code>",
+            f"<b>ГОТОВО!</b>\n\n"
+            f"<b>{document_templates[context.user_data['service']]['name']}</b>\n\n"
+            f"{safe_doc}\n\n"
+            f"<b>Оплата:</b> <code>2200 7007 0401 2581</code>",
             parse_mode="HTML"
         )
 
     context.user_data.clear()
 
+# Основная функция
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

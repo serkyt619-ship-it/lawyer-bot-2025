@@ -1,4 +1,4 @@
-# main.py — декабрь 2025, PS256, корректный Chat Completions YandexGPT
+# main.py — декабрь 2025, PS256, YandexGPT 5.1 Pro
 
 import os
 import logging
@@ -17,13 +17,12 @@ logger = logging.getLogger("bot")
 
 # Переменные из Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
 YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")
 YC_PRIVATE_KEY = os.getenv("YC_API_KEY")
 YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")
 
-if not all([BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
-    raise ValueError("Задай BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!")
+if not all([BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
+    raise ValueError("Задай BOT_TOKEN, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!")
 
 # Генерация IAM-токена из PEM-ключа (PS256)
 def get_iam_token():
@@ -56,10 +55,10 @@ def get_iam_token():
         raise ValueError(f"Ошибка генерации IAM-токена: {response.text}")
     return response.json()["iamToken"]
 
-# Клиент YandexGPT с IAM-токеном (Chat Completions)
+# Клиент YandexGPT 5.1 Pro
 client = AsyncOpenAI(
     api_key=get_iam_token(),
-    base_url="https://llm.api.cloud.yandex.net/foundationModels/v1"
+    base_url="https://llm.api.cloud.yandex.net/v1"
 )
 
 # Шаблоны документов
@@ -71,17 +70,17 @@ document_templates = {
     "consumer": {"name": "Претензия по защите прав потребителей", "price": 500},
 }
 
-# Генерация документа через YandexGPT
+# Генерация документа через YandexGPT 5.1 Pro
 async def generate_document(user_text: str, service: str) -> str | None:
     try:
         response = await client.chat.completions.create(
-            model=f"gpt://{YC_FOLDER_ID}/yandexgpt/latest",
-            temperature=0.3,
-            max_tokens=4000,
+            model="yandexgpt-5-pro",  # модель YandexGPT 5.1 Pro
             messages=[
-                {"role": "system", "content": "Ты — профессиональный российский юрист. Пиши ТОЛЬКО готовый юридический документ, без пояснений."},
+                {"role": "system", "content": "Ты — профессиональный российский юрист. Пиши ТОЛЬКО готовый юридический документ, без объяснений."},
                 {"role": "user", "content": f"Составь документ: {document_templates[service]['name']}\n\nСитуация:\n{user_text}"}
             ],
+            temperature=0.3,
+            max_tokens=4000,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -90,10 +89,7 @@ async def generate_document(user_text: str, service: str) -> str | None:
 
 # /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)]
-        for k, v in document_templates.items()
-    ]
+    keyboard = [[InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)] for k, v in document_templates.items()]
     await update.message.reply_text(
         "АВТОЮРИСТ 24/7\n\nВыберите тип документа:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -106,9 +102,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     service = query.data
     context.user_data["service"] = service
     await query.edit_message_text(
-        f"<b>{document_templates[service]['name']}</b>\n"
-        f"Цена: {document_templates[service]['price']} ₽\n\n"
-        f"Опишите вашу ситуацию:",
+        f"<b>{document_templates[service]['name']}</b>\nЦена: {document_templates[service]['price']} ₽\n\nОпишите вашу ситуацию:",
         parse_mode="HTML"
     )
 
@@ -134,16 +128,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_document(
             open("document.txt", "rb"),
             filename="документ.txt",
-            caption=f"{document_templates[context.user_data['service']]['name']}\n\n"
-                    f"Оплата: 2200 7007 0401 2581"
+            caption=f"{document_templates[context.user_data['service']]['name']}\n\nОплата: 2200 7007 0401 2581"
         )
         os.remove("document.txt")
     else:
         await thinking.edit_text(
-            f"<b>ГОТОВО!</b>\n\n"
-            f"<b>{document_templates[context.user_data['service']]['name']}</b>\n\n"
-            f"{safe_doc}\n\n"
-            f"<b>Оплата:</b> <code>2200 7007 0401 2581</code>",
+            f"<b>ГОТОВО!</b>\n\n<b>{document_templates[context.user_data['service']]['name']}</b>\n\n{safe_doc}\n\n<b>Оплата:</b> <code>2200 7007 0401 2581</code>",
             parse_mode="HTML"
         )
 

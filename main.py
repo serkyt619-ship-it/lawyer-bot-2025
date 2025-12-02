@@ -1,4 +1,4 @@
-# main.py — рабочая версия декабрь 2025 с PS256 и Chat Completions
+# main.py — декабрь 2025, PS256, корректный Chat Completions YandexGPT
 
 import os
 import logging
@@ -18,9 +18,9 @@ logger = logging.getLogger("bot")
 # Переменные из Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")  # ID сервисного аккаунта
-YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # PEM ключ IAM
-YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")  # ID IAM-ключа
+YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")
+YC_PRIVATE_KEY = os.getenv("YC_API_KEY")
+YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")
 
 if not all([BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
     raise ValueError("Задай BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!")
@@ -59,7 +59,7 @@ def get_iam_token():
 # Клиент YandexGPT с IAM-токеном (Chat Completions)
 client = AsyncOpenAI(
     api_key=get_iam_token(),
-    base_url="https://llm.api.cloud.yandex.net/foundationModels/v1/chat/completions"
+    base_url="https://llm.api.cloud.yandex.net/foundationModels/v1"
 )
 
 # Шаблоны документов
@@ -99,7 +99,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# Обработка нажатия кнопок
+# Обработка кнопок
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()

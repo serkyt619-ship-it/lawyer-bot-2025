@@ -14,6 +14,9 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 
+# =========================
+# ENV (Railway Variables)
+# =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID")
@@ -28,6 +31,9 @@ if not YANDEX_API_KEY:
 if not YANDEX_FOLDER_ID:
     raise ValueError("YANDEX_FOLDER_ID не задан (Railway Variables)")
 
+# =========================
+# Pricing (5 categories)
+# =========================
 CATEGORIES: Dict[str, Dict] = {
     "police": {"title": "Заявление в полицию", "price": 149},
     "claim":  {"title": "Претензия продавцу/услуге", "price": 199},
@@ -36,12 +42,18 @@ CATEGORIES: Dict[str, Dict] = {
     "motion": {"title": "Ходатайство", "price": 129},
 }
 
-ORDER_TTL_MINUTES = 30
+ORDER_TTL_MINUTES = 30  # сколько времени даётся на оплату
 
+# =========================
+# YandexGPT config
+# =========================
 YANDEX_COMPLETION_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 YANDEX_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest"
 TIMEOUT = aiohttp.ClientTimeout(total=75)
 
+# =========================
+# DB
+# =========================
 DB_PATH = "payments.db"
 
 def db_init():
@@ -98,6 +110,9 @@ def is_verified(user_id: int, category: str, ttl_days: int = 30) -> bool:
         return False
     return (time.time() - created_at) <= ttl_days * 86400
 
+# =========================
+# Bot init
+# =========================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -113,18 +128,15 @@ menu_kb = ReplyKeyboardMarkup(
 
 pending_category: Dict[int, str] = {}
 
+# =========================
+# Helpers
+# =========================
 def norm_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 def chunk_text(s: str, chunk_size: int = 3500):
     for i in range(0, len(s), chunk_size):
         yield s[i:i + chunk_size]
-
-def mask_card_number(card: str) -> str:
-    digits = re.sub(r"\D", "", card or "")
-    if len(digits) < 4:
-        return "**** **** **** ****"
-    return f"**** **** **** {digits[-4:]}"
 
 def fmt_amount(amount_cents: int) -> str:
     rub = amount_cents // 100
@@ -218,6 +230,9 @@ async def generate_document(category_key: str, user_text: str) -> Tuple[bool, st
 def order_expired(created_at: int) -> bool:
     return (time.time() - created_at) > ORDER_TTL_MINUTES * 60
 
+# =========================
+# Handlers
+# =========================
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     await message.answer(
@@ -240,27 +255,11 @@ async def pay_handler(message: types.Message):
         await message.answer("Добавь CARD_NUMBER и CARD_HOLDER в Railway Variables.", reply_markup=menu_kb)
         return
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👁 Показать номер карты", callback_data="showcard")]
-    ])
     await message.answer(
-        "💳 Оплата переводом на карту.\n\n"
-        f"Карта (скрыта): {mask_card_number(CARD_NUMBER)}\n"
+        "💳 Оплата переводом на карту:\n\n"
+        f"Номер карты: `{CARD_NUMBER}`\n"
         f"Получатель: {CARD_HOLDER}\n\n"
-        "Полный номер можно открыть по кнопке (по запросу).",
-        reply_markup=kb
-    )
-
-@dp.callback_query(lambda c: c.data == "showcard")
-async def show_card(call: types.CallbackQuery):
-    await call.answer()
-    if not CARD_NUMBER:
-        await call.message.answer("Карта не настроена.")
-        return
-    # Показываем полный номер только по запросу
-    await call.message.answer(
-        f"✅ Полный номер карты для перевода:\n`{CARD_NUMBER}`\n\n"
-        "После перевода выбери категорию и подтверди оплату суммой+кодом.",
+        "Уникальную сумму и код бот выдаёт после выбора категории.",
         parse_mode="Markdown",
         reply_markup=menu_kb
     )
@@ -319,8 +318,8 @@ async def cat_select(call: types.CallbackQuery):
 
     await call.message.answer(
         f"💳 Оплата: *{cat['title']}*\n\n"
-        f"Переведи точную сумму: *{fmt_amount(amount_cents)}*\n"
-        f"На карту: {mask_card_number(CARD_NUMBER)}\n"
+        f"Переведи точную сумму: *{fmt_amount(amount_cents)}*\n\n"
+        f"Номер карты: `{CARD_NUMBER}`\n"
         f"Получатель: {CARD_HOLDER}\n"
         f"Код: `{code}`\n\n"
         f"Срок: {ORDER_TTL_MINUTES} минут.\n\n"

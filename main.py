@@ -3,7 +3,8 @@ import os
 import re
 import sqlite3
 import time
-from typing import Dict, Tuple
+import random
+from typing import Dict, Tuple, Optional
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types
@@ -34,12 +35,14 @@ if not YANDEX_FOLDER_ID:
 # Pricing (5 categories)
 # =========================
 CATEGORIES: Dict[str, Dict] = {
-    "police": {"title": "Заявление в полицию", "price": 149, "doc_hint": "кража/мошенничество/угрозы/побои"},
-    "claim":  {"title": "Претензия продавцу/услуге", "price": 199, "doc_hint": "возврат денег/гарантия/услуги"},
-    "compl":  {"title": "Жалоба в госорган", "price": 179, "doc_hint": "прокуратура/УК/Роспотребнадзор"},
-    "lawsuit":{"title": "Иск в суд", "price": 399, "doc_hint": "взыскать деньги/восстановить права"},
-    "motion": {"title": "Ходатайство", "price": 129, "doc_hint": "процессуальная просьба суду/органу"},
+    "police": {"title": "Заявление в полицию", "price": 149},
+    "claim":  {"title": "Претензия продавцу/услуге", "price": 199},
+    "compl":  {"title": "Жалоба в госорган", "price": 179},
+    "lawsuit":{"title": "Иск в суд", "price": 399},
+    "motion": {"title": "Ходатайство", "price": 129},
 }
+
+ORDER_TTL_MINUTES = 30  # сколько времени даётся на оплату
 
 # =========================
 # YandexGPT config
@@ -49,7 +52,7 @@ YANDEX_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest"
 TIMEOUT = aiohttp.ClientTimeout(total=75)
 
 # =========================
-# DB (payments)
+# DB
 # =========================
 DB_PATH = "payments.db"
 
@@ -57,37 +60,56 @@ def db_init():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS payments (
+        CREATE TABLE IF NOT EXISTS orders (
             user_id INTEGER NOT NULL,
             category TEXT NOT NULL,
-            paid_at INTEGER NOT NULL,
-            pay_code TEXT NOT NULL,
+            amount_cents INTEGER NOT NULL,
+            code TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            verified INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, category)
         )
     """)
     con.commit()
     con.close()
 
-def mark_paid(user_id: int, category: str, pay_code: str):
+def create_or_get_order(user_id: int, category: str, amount_cents: int, code: str) -> None:
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO payments (user_id, category, paid_at, pay_code) VALUES (?, ?, ?, ?)",
-        (user_id, category, int(time.time()), pay_code)
-    )
+    cur.execute("""
+        INSERT OR REPLACE INTO orders (user_id, category, amount_cents, code, created_at, verified)
+        VALUES (?, ?, ?, ?, ?, 0)
+    """, (user_id, category, amount_cents, code, int(time.time())))
     con.commit()
     con.close()
 
-def is_paid(user_id: int, category: str, ttl_days: int = 30) -> bool:
+def get_order(user_id: int, category: str) -> Optional[Tuple[int, str, int, int]]:
+    # returns (amount_cents, code, created_at, verified)
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    cur.execute("SELECT paid_at FROM payments WHERE user_id=? AND category=?", (user_id, category))
+    cur.execute("SELECT amount_cents, code, created_at, verified FROM orders WHERE user_id=? AND category=?",
+                (user_id, category))
     row = cur.fetchone()
     con.close()
     if not row:
+        return None
+    return int(row[0]), str(row[1]), int(row[2]), int(row[3])
+
+def mark_verified(user_id: int, category: str):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("UPDATE orders SET verified=1 WHERE user_id=? AND category=?", (user_id, category))
+    con.commit()
+    con.close()
+
+def is_verified(user_id: int, category: str, ttl_days: int = 30) -> bool:
+    row = get_order(user_id, category)
+    if not row:
         return False
-    paid_at = int(row[0])
-    return (time.time() - paid_at) <= ttl_days * 86400
+    amount_cents, code, created_at, verified = row
+    if verified != 1:
+        return False
+    return (time.time() - created_at) <= ttl_days * 86400
 
 # =========================
 # Bot init
@@ -105,11 +127,8 @@ menu_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# =========================
-# State (simple, in-memory)
-# =========================
-# pending[user_id] = {"category": "...", "problem": "..."}
-pending = {}
+# in-memory state: user_id -> category chosen for generation
+pending_category: Dict[int, str] = {}
 
 # =========================
 # Helpers
@@ -127,24 +146,55 @@ def mask_card_number(card: str) -> str:
         return "**** **** **** ****"
     return f"**** **** **** {digits[-4:]}"
 
-def price_text() -> str:
-    lines = ["💰 *Прайс (5 категорий)*\n"]
-    for k, v in CATEGORIES.items():
-        lines.append(f"• *{v['title']}* — {v['price']} ₽ _(подходит: {v['doc_hint']})_")
-    lines.append("\nОплата: переводом на карту (по кнопке «ℹ️ Оплата»).")
-    return "\n".join(lines)
+def fmt_amount(amount_cents: int) -> str:
+    rub = amount_cents // 100
+    kop = amount_cents % 100
+    return f"{rub}.{kop:02d} ₽"
+
+def make_unique_amount(base_rub: int) -> int:
+    """
+    Уникальная сумма: базовая цена + случайные копейки 10..99
+    Например 199.37 ₽ -> 19937 cents
+    """
+    kop = random.randint(10, 99)
+    return base_rub * 100 + kop
+
+def make_code(user_id: int, category: str) -> str:
+    return f"LAW-{category.upper()}-{user_id}"
 
 def category_kb() -> InlineKeyboardMarkup:
     rows = []
     for key, v in CATEGORIES.items():
-        rows.append([InlineKeyboardButton(text=f"{v['title']} — {v['price']} ₽", callback_data=f"cat:{key}")])
+        rows.append([InlineKeyboardButton(text=f"{v['title']} — от {v['price']} ₽", callback_data=f"cat:{key}")])
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cat:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def make_pay_code(user_id: int, category: str) -> str:
-    # Код, который пользователь пишет в комментарии к переводу (желательно)
-    # и потом отправляет боту.
-    return f"LAW-{category.upper()}-{user_id}"
+def price_text() -> str:
+    lines = ["💰 *Прайс (5 категорий)*\n"]
+    for k, v in CATEGORIES.items():
+        lines.append(f"• *{v['title']}* — от {v['price']} ₽")
+    lines.append("\nДоступ открывается по уникальной сумме + коду (защита от халявщиков).")
+    return "\n".join(lines)
+
+def parse_confirm(text: str) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Парсим подтверждение оплаты из текста пользователя.
+    Ожидаем: сумма (например 199.37) и код LAW-XXX-123
+    Возвращаем (amount_cents, code) или (None, None)
+    """
+    t = (text or "").upper()
+
+    # code
+    m_code = re.search(r"(LAW-[A-Z]+-\d+)", t)
+    code = m_code.group(1) if m_code else None
+
+    # amount like 199.37 or 199,37 or 19937 (нежелательно) — берём с точкой/запятой
+    m_amt = re.search(r"(\d{2,6})[.,](\d{2})", t)
+    if not m_amt:
+        return None, code
+    rub = int(m_amt.group(1))
+    kop = int(m_amt.group(2))
+    return rub * 100 + kop, code
 
 async def yandexgpt_completion(system_text: str, user_text: str, max_tokens: int = 1800, temperature: float = 0.2) -> Tuple[bool, str]:
     body = {
@@ -167,7 +217,6 @@ async def yandexgpt_completion(system_text: str, user_text: str, max_tokens: int
                 return False, f"❌ Не смог разобрать ответ YandexGPT.\n{raw}"
 
 def build_prompt(category_key: str, user_text: str) -> str:
-    # Жёстко задаём тип, потому что категория выбрана пользователем.
     if category_key == "police":
         doc_title = "ЗАЯВЛЕНИЕ О ПРЕСТУПЛЕНИИ"
     elif category_key == "claim":
@@ -184,29 +233,32 @@ def build_prompt(category_key: str, user_text: str) -> str:
 
 Требования:
 1) Официальный деловой стиль, чётко и структурировано.
-2) В начале "шапка" с полями (оставить пустыми):
-   - Куда: (орган/суд/организация)
-   - От: ФИО
-   - Адрес
-   - Телефон
-   - E-mail
-3) Далее заголовок документа.
-4) Раздел "Обстоятельства" — только факты из описания (не выдумывай).
-5) Раздел "Правовое обоснование" — общие формулировки права РФ (без точных статей, если не уверен).
-6) Раздел "Прошу" — 3–10 пунктов по смыслу.
-   - Если это заявление в полицию: добавь пункт "зарегистрировать сообщение в КУСП" (если уместно).
-7) "Приложения" — примерный список по смыслу (если уместно).
-8) В конце: Дата/Подпись.
-9) В конце дисклеймер: "Это не является юридической консультацией..."
+2) "Шапка" с полями (пустыми):
+   - Куда:
+   - От:
+   - Адрес:
+   - Телефон:
+   - E-mail:
+3) Далее заголовок.
+4) Обстоятельства — только факты из описания (не выдумывай).
+5) Правовое обоснование — общие формулировки законодательства РФ.
+6) Прошу — 3–10 пунктов.
+   - Для полиции: добавь "зарегистрировать сообщение в КУСП" (если уместно).
+7) Приложения — по смыслу.
+8) Дата/Подпись.
+9) Дисклеймер в конце.
 
 Описание пользователя:
 {user_text}
 """.strip()
 
 async def generate_document(category_key: str, user_text: str) -> Tuple[bool, str]:
-    system = "Ты аккуратный юридический помощник. Не выдумывай факты. Пиши структурировано и официально."
+    system = "Ты аккуратный юридический помощник. Не выдумывай факты. Пиши официально и структурировано."
     prompt = build_prompt(category_key, user_text)
     return await yandexgpt_completion(system, prompt, max_tokens=2200, temperature=0.25)
+
+def order_expired(created_at: int) -> bool:
+    return (time.time() - created_at) > ORDER_TTL_MINUTES * 60
 
 # =========================
 # Handlers
@@ -215,28 +267,17 @@ async def generate_document(category_key: str, user_text: str) -> Tuple[bool, st
 async def start_handler(message: types.Message):
     await message.answer(
         "👋 Привет!\n\n"
-        "1) Нажми «🤖 Сгенерировать документ»\n"
-        "2) Выбери категорию\n"
-        "3) Если не оплачено — бот покажет реквизиты и код\n"
-        "4) После «✅ Я оплатил» откроется генерация\n\n"
-        "Оплата показывается только по кнопке «ℹ️ Оплата».",
+        "Здесь оплата усилена:\n"
+        "• бот выдаёт уникальную сумму (с копейками)\n"
+        "• и уникальный код\n"
+        "• доступ открывается только при совпадении суммы + кода\n\n"
+        "Нажми «🤖 Сгенерировать документ».",
         reply_markup=menu_kb
     )
 
 @dp.message(lambda m: m.text == "💰 Прайс")
 async def price_handler(message: types.Message):
     await message.answer(price_text(), parse_mode="Markdown", reply_markup=menu_kb)
-
-@dp.message(lambda m: m.text == "🆘 Помощь")
-async def help_handler(message: types.Message):
-    await message.answer(
-        "Пиши так:\n"
-        "• кто/что/где/когда\n"
-        "• суммы/даты/названия\n"
-        "• чего хочешь добиться\n\n"
-        "После оплаты бот генерирует документ одним сообщением.",
-        reply_markup=menu_kb
-    )
 
 @dp.message(lambda m: m.text == "ℹ️ Оплата")
 async def pay_handler(message: types.Message):
@@ -245,8 +286,7 @@ async def pay_handler(message: types.Message):
             "💳 Оплата переводом на карту:\n\n"
             f"Карта: {mask_card_number(CARD_NUMBER)}\n"
             f"Получатель: {CARD_HOLDER}\n\n"
-            "Чтобы было проще найти оплату (для вас):\n"
-            "в комментарии к переводу пишите код, который покажет бот после выбора категории.",
+            "Уникальную сумму и код бот выдаёт после выбора категории.",
             reply_markup=menu_kb
         )
     else:
@@ -255,6 +295,18 @@ async def pay_handler(message: types.Message):
             "Добавь в Railway Variables: CARD_NUMBER и CARD_HOLDER.",
             reply_markup=menu_kb
         )
+
+@dp.message(lambda m: m.text == "🆘 Помощь")
+async def help_handler(message: types.Message):
+    await message.answer(
+        "Как это работает:\n"
+        "1) Выбираешь категорию\n"
+        "2) Получаешь уникальную сумму и код\n"
+        "3) Переводишь ТОЧНУЮ сумму\n"
+        "4) Отправляешь боту: сумму + код\n"
+        "5) Бот открывает доступ и генерирует документ\n",
+        reply_markup=menu_kb
+    )
 
 @dp.message(lambda m: m.text == "🤖 Сгенерировать документ")
 async def gen_btn(message: types.Message):
@@ -265,6 +317,7 @@ async def gen_btn(message: types.Message):
 async def cat_select(call: types.CallbackQuery):
     await call.answer()
     key = call.data.split(":", 1)[1]
+
     if key == "cancel":
         await call.message.answer("Ок, отменил ✅", reply_markup=menu_kb)
         return
@@ -275,65 +328,85 @@ async def cat_select(call: types.CallbackQuery):
 
     user_id = call.from_user.id
     cat = CATEGORIES[key]
+    pending_category[user_id] = key
 
-    # Если уже оплачено — сразу просим ситуацию
-    if is_paid(user_id, key):
-        pending[user_id] = {"category": key, "problem": ""}
+    # если уже верифицировано — просим ситуацию
+    if is_verified(user_id, key):
         await call.message.answer(
-            f"✅ Доступ активен для: {cat['title']}\n\n"
+            f"✅ Доступ активен: {cat['title']}\n\n"
             "Напиши ситуацию одним сообщением (2–8 предложений).",
             reply_markup=menu_kb
         )
         return
 
-    # Если не оплачено — даём реквизиты и код
-    pay_code = make_pay_code(user_id, key)
-    pending[user_id] = {"category": key, "problem": ""}
-
-    price = cat["price"]
-    title = cat["title"]
-    masked = mask_card_number(CARD_NUMBER)
+    # создаём новый заказ с уникальной суммой и кодом
+    amount_cents = make_unique_amount(cat["price"])
+    code = make_code(user_id, key)
+    create_or_get_order(user_id, key, amount_cents, code)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"paid:{key}")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="paid:cancel")],
+        [InlineKeyboardButton(text="✅ Подтвердить оплату", callback_data="confirm")],
+        [InlineKeyboardButton(text="🔄 Сменить сумму", callback_data="regen")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")],
     ])
 
     await call.message.answer(
-        f"💳 *Оплата для категории:* {title}\n"
-        f"*Стоимость:* {price} ₽\n\n"
-        f"*Перевод на карту:* {masked}\n"
-        f"*Получатель:* {CARD_HOLDER}\n\n"
-        f"✍️ *Код для комментария к переводу:* `{pay_code}`\n\n"
-        "После оплаты нажми «✅ Я оплатил» и отправь код (или последние 4 цифры + сумму).",
+        f"💳 *Оплата: {cat['title']}*\n\n"
+        f"Переведи *ТОЧНУЮ сумму*: *{fmt_amount(amount_cents)}*\n"
+        f"На карту: {mask_card_number(CARD_NUMBER)}\n"
+        f"Получатель: {CARD_HOLDER}\n\n"
+        f"✍️ Код для комментария к переводу: `{code}`\n\n"
+        f"⏳ Срок: {ORDER_TTL_MINUTES} минут.\n\n"
+        "После перевода нажми «✅ Подтвердить оплату» и отправь одним сообщением:\n"
+        "`сумма код`\n"
+        f"Пример: `{fmt_amount(amount_cents).replace(' ₽','')} {code}`",
         parse_mode="Markdown",
         reply_markup=kb
     )
 
-@dp.callback_query(lambda c: c.data and c.data.startswith("paid:"))
-async def paid_flow(call: types.CallbackQuery):
+@dp.callback_query(lambda c: c.data in {"confirm", "regen", "cancel"})
+async def pay_actions(call: types.CallbackQuery):
     await call.answer()
     user_id = call.from_user.id
-    key = call.data.split(":", 1)[1]
-    if key == "cancel":
+
+    if call.data == "cancel":
+        pending_category.pop(user_id, None)
         await call.message.answer("Ок, отменил ✅", reply_markup=menu_kb)
-        pending.pop(user_id, None)
         return
 
-    if user_id not in pending or pending[user_id].get("category") != key:
+    if user_id not in pending_category:
         await call.message.answer("Сначала выбери категорию через «🤖 Сгенерировать документ».", reply_markup=menu_kb)
         return
 
+    key = pending_category[user_id]
     cat = CATEGORIES[key]
-    code = make_pay_code(user_id, key)
+
+    if call.data == "regen":
+        amount_cents = make_unique_amount(cat["price"])
+        code = make_code(user_id, key)
+        create_or_get_order(user_id, key, amount_cents, code)
+        await call.message.answer(
+            f"🔄 Новая сумма: *{fmt_amount(amount_cents)}*\n"
+            f"Код: `{code}`\n\n"
+            "Теперь переведи эту сумму и отправь: `сумма код`",
+            parse_mode="Markdown",
+            reply_markup=menu_kb
+        )
+        return
+
+    # confirm
+    row = get_order(user_id, key)
+    if not row:
+        await call.message.answer("Не нашёл заказ. Выбери категорию заново.", reply_markup=menu_kb)
+        return
+    amount_cents, code, created_at, verified = row
+    if order_expired(created_at):
+        await call.message.answer("⛔ Срок оплаты истёк. Выбери категорию заново, чтобы получить новую сумму.", reply_markup=menu_kb)
+        return
 
     await call.message.answer(
-        "Отправь одним сообщением подтверждение (любой формат):\n\n"
-        f"Пример 1: `{code}`\n"
-        f"Пример 2: `оплатил {cat['price']} последние4 8545`\n"
-        "Пример 3: `скрин есть` (если хочешь)\n\n"
-        "⚠️ Важно: это перевод на карту, бот не может проверить банк автоматически.\n"
-        "Эта версия открывает доступ после ввода кода.",
+        "Отправь подтверждение одним сообщением:\n"
+        f"Пример: `{fmt_amount(amount_cents).replace(' ₽','')} {code}`",
         parse_mode="Markdown",
         reply_markup=menu_kb
     )
@@ -343,57 +416,79 @@ async def text_handler(message: types.Message):
     user_id = message.from_user.id
     text = norm_text(message.text)
 
-    # Если пользователь в процессе оплаты/генерации
-    if user_id in pending:
-        category = pending[user_id].get("category")
-        if category not in CATEGORIES:
-            pending.pop(user_id, None)
-            await message.answer("Ошибка состояния. Нажми «🤖 Сгенерировать документ» заново.", reply_markup=menu_kb)
-            return
+    # если пользователь выбрал категорию
+    key = pending_category.get(user_id)
+    if not key:
+        # подсказка
+        if text and text.lower() not in ("/start",):
+            await message.answer("Нажми «🤖 Сгенерировать документ» и выбери категорию.", reply_markup=menu_kb)
+        return
 
-        # Если ещё не оплачено — считаем любое сообщение подтверждением оплаты (по твоему требованию "без админа")
-        if not is_paid(user_id, category):
-            pay_code = make_pay_code(user_id, category)
+    cat = CATEGORIES[key]
 
-            # Мини-проверка: если человек прислал именно код — отлично. Если нет — всё равно откроем.
-            # Можно ужесточить позже.
-            mark_paid(user_id, category, pay_code)
-
-            await message.answer(
-                f"✅ Оплата зафиксирована.\n\n"
-                f"Теперь напиши ситуацию одним сообщением для категории:\n*{CATEGORIES[category]['title']}*",
-                parse_mode="Markdown",
-                reply_markup=menu_kb
-            )
-            return
-
-        # Оплачено — генерируем документ
+    # если уже верифицировано — ждём проблему
+    if is_verified(user_id, key):
         if len(text) < 15:
             await message.answer("Напиши чуть подробнее (минимум 2–3 предложения).", reply_markup=menu_kb)
             return
 
         await message.answer("⏳ Генерирую документ…")
-        ok, result = await generate_document(category, text)
+        ok, result = await generate_document(key, text)
         if not ok:
             await message.answer(result, reply_markup=menu_kb)
             return
-
         for part in chunk_text(result):
             await message.answer(part)
-
-        await message.answer("Готово ✅ Если надо — дополни детали, я перегенерирую.", reply_markup=menu_kb)
+        await message.answer("Готово ✅ Если хочешь — дополни детали, я перегенерирую.", reply_markup=menu_kb)
         return
 
-    # Если не в процессе — подсказка
-    if text and text.lower() not in ("/start",):
-        await message.answer("Нажми «🤖 Сгенерировать документ» и выбери категорию.", reply_markup=menu_kb)
+    # иначе — это сообщение либо подтверждение оплаты, либо проблема (но сначала нужен verify)
+    row = get_order(user_id, key)
+    if not row:
+        await message.answer("Не нашёл заказ. Выбери категорию заново.", reply_markup=menu_kb)
+        return
+
+    amount_cents, code, created_at, verified = row
+    if order_expired(created_at):
+        await message.answer("⛔ Срок оплаты истёк. Выбери категорию заново, чтобы получить новую сумму.", reply_markup=menu_kb)
+        return
+
+    amt_in, code_in = parse_confirm(text)
+    if amt_in is None or code_in is None:
+        await message.answer(
+            "❌ Не вижу подтверждение.\n"
+            "Отправь так: `сумма код`\n"
+            f"Пример: `{fmt_amount(amount_cents).replace(' ₽','')} {code}`",
+            parse_mode="Markdown",
+            reply_markup=menu_kb
+        )
+        return
+
+    if amt_in != amount_cents or code_in != code:
+        await message.answer(
+            "❌ Не совпало.\n\n"
+            f"Нужно: *{fmt_amount(amount_cents)}* и код `{code}`\n"
+            "Проверь сумму (копейки важны) и код, и отправь снова.",
+            parse_mode="Markdown",
+            reply_markup=menu_kb
+        )
+        return
+
+    # success verify
+    mark_verified(user_id, key)
+    await message.answer(
+        f"✅ Оплата подтверждена для: *{cat['title']}*\n\n"
+        "Теперь напиши ситуацию одним сообщением (2–8 предложений).",
+        parse_mode="Markdown",
+        reply_markup=menu_kb
+    )
 
 # =========================
 # Run
 # =========================
 async def main():
     db_init()
-    await bot.delete_webhook(drop_pending_updates=True)  # фикс TelegramConflictError
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

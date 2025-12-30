@@ -1,188 +1,188 @@
-# main.py — декабрь 2025, PS256, YandexGPT 5.1 Pro
-
 import os
-import logging
-import html
-import time
-import jwt
-import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+import uuid
+import asyncio
+from datetime import datetime
+
+from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 )
-from openai import AsyncOpenAI
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.backends import default_backend
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.storage.memory import MemoryStorage
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("bot")
+from docx import Document
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
-# Переменные из Render Environment
+# ================== НАСТРОЙКИ ==================
+load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_SERVICE_ACCOUNT_ID = os.getenv("YC_SERVICE_ACCOUNT_ID")
-YC_PRIVATE_KEY = os.getenv("YC_API_KEY")  # PEM ключ
-YC_IAM_KEY_ID = os.getenv("YC_IAM_KEY_ID")
+CARD_NUMBER = os.getenv("CARD_NUMBER")
+CARD_HOLDER = os.getenv("CARD_HOLDER")
 
-if not all([BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_PRIVATE_KEY, YC_IAM_KEY_ID]):
-    raise ValueError(
-        "Задайте BOT_TOKEN, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, YC_API_KEY и YC_IAM_KEY_ID в Render!"
-    )
+OUT_DIR = "docs"
+os.makedirs(OUT_DIR, exist_ok=True)
 
-# Шаблоны документов
-document_templates = {
-    "prosecutor": {"name": "Жалоба в прокуратуру", "price": 700},
-    "court": {"name": "Исковое заявление в суд", "price": 1500},
-    "mvd": {"name": "Жалоба в МВД", "price": 800},
-    "zkh": {"name": "Жалоба в жилищную инспекцию / Роспотребнадзор", "price": 600},
-    "consumer": {"name": "Претензия по защите прав потребителей", "price": 500},
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# ================== КАТЕГОРИИ ==================
+CATEGORIES = {
+    "police": ("Заявление в полицию", 199),
+    "seller": ("Претензия продавцу", 299),
+    "court": ("Исковое заявление в суд", 499),
+    "rospotreb": ("Жалоба в Роспотребнадзор", 249),
+    "bailiff": ("Заявление судебным приставам", 349),
 }
 
-# Генерация IAM-токена из PEM-ключа (PS256)
-def get_iam_token() -> str:
-    try:
-        now = int(time.time())
-        payload = {
-            "iss": YC_SERVICE_ACCOUNT_ID,
-            "aud": "https://iam.api.cloud.yandex.net/iam/v1/tokens",
-            "iat": now,
-            "exp": now + 3600
-        }
+# ================== FSM ==================
+class Form(StatesGroup):
+    category = State()
+    fio = State()
+    address = State()
+    phone = State()
+    details = State()
+    waiting_transfer = State()
 
-        pem_key = YC_PRIVATE_KEY.replace("\\n", "\n").strip('"')
-
-        private_key_obj = serialization.load_pem_private_key(
-            pem_key.encode(),
-            password=None,
-            backend=default_backend()
-        )
-
-        encoded_token = jwt.encode(
-            payload,
-            private_key_obj,
-            algorithm="PS256",
-            headers={"typ": "JWT", "alg": "PS256", "kid": YC_IAM_KEY_ID}
-        )
-
-        response = requests.post(
-            "https://iam.api.cloud.yandex.net/iam/v1/tokens",
-            json={"jwt": encoded_token}
-        )
-        if response.status_code != 200:
-            raise ValueError(f"Ошибка генерации IAM-токена: {response.text}")
-
-        return response.json()["iamToken"]
-
-    except Exception as e:
-        logger.error(f"Ошибка при генерации IAM-токена: {e}")
-        raise
-
-# Генерация документа через YandexGPT 5.1 Pro
-async def generate_document(user_text: str, service: str) -> str | None:
-    try:
-        iam_token = get_iam_token()
-        client = AsyncOpenAI(api_key=iam_token, base_url="https://llm.api.cloud.yandex.net/v1")
-
-        # Правильный URI модели
-        model_uri = f"models/{YC_FOLDER_ID}/yandexgpt-5-pro"
-
-        response = await client.chat.completions.create(
-            model=model_uri,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Ты — профессиональный российский юрист. Пиши ТОЛЬКО готовый юридический документ, без объяснений."
-                },
-                {
-                    "role": "user",
-                    "content": f"Составь документ: {document_templates[service]['name']}\n\nСитуация:\n{user_text}"
-                }
-            ],
-            temperature=0.3,
-            max_tokens=4000,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"Ошибка YandexGPT: {e}")
-        return None
-
-# /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton(f"{v['name']} — {v['price']} ₽", callback_data=k)]
-        for k, v in document_templates.items()
-    ]
-    await update.message.reply_text(
-        "АВТОЮРИСТ 24/7\n\nВыберите тип документа:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+# ================== КЛАВИАТУРЫ ==================
+def categories_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"{name} — {price} ₽",
+                callback_data=key
+            )]
+            for key, (name, price) in CATEGORIES.items()
+        ]
     )
 
-# Обработка кнопок
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    service = query.data
-    context.user_data["service"] = service
-    await query.edit_message_text(
-        f"<b>{document_templates[service]['name']}</b>\nЦена: {document_templates[service]['price']} ₽\n\nОпишите вашу ситуацию:",
-        parse_mode="HTML"
+# ================== START ==================
+@dp.message(CommandStart())
+async def start(msg: Message, state: FSMContext):
+    await state.clear()
+    await msg.answer(
+        "👨‍⚖️ *Юрист-бот*\n\n"
+        "Я автоматически составлю заявление.\n"
+        "Выбери категорию:",
+        reply_markup=categories_kb(),
+        parse_mode="Markdown"
     )
 
-# Обработка текстовых сообщений
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "service" not in context.user_data:
-        await update.message.reply_text("Нажмите /start и выберите документ")
+# ================== ВЫБОР КАТЕГОРИИ ==================
+@dp.callback_query()
+async def choose_category(cb: CallbackQuery, state: FSMContext):
+    if cb.data not in CATEGORIES:
+        return
+    await state.update_data(category=cb.data)
+    await state.set_state(Form.fio)
+    await cb.message.answer("Введите *ФИО*:", parse_mode="Markdown")
+
+# ================== СБОР ДАННЫХ ==================
+@dp.message(Form.fio)
+async def step_fio(msg: Message, state: FSMContext):
+    await state.update_data(fio=msg.text)
+    await state.set_state(Form.address)
+    await msg.answer("Введите *адрес проживания*:")
+
+@dp.message(Form.address)
+async def step_address(msg: Message, state: FSMContext):
+    await state.update_data(address=msg.text)
+    await state.set_state(Form.phone)
+    await msg.answer("Введите *телефон*:")
+
+@dp.message(Form.phone)
+async def step_phone(msg: Message, state: FSMContext):
+    await state.update_data(phone=msg.text)
+    await state.set_state(Form.details)
+    await msg.answer("Кратко опишите ситуацию *по фактам*:")
+
+# ================== ОПЛАТА ==================
+@dp.message(Form.details)
+async def step_details(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    cat_name, price = CATEGORIES[data["category"]]
+
+    order_id = uuid.uuid4().hex[:6]
+    await state.update_data(details=msg.text, order_id=order_id)
+
+    await msg.answer(
+        f"📄 *{cat_name}*\n"
+        f"💰 Сумма: *{price} ₽*\n\n"
+        f"💳 Карта: `{CARD_NUMBER}`\n"
+        f"👤 Получатель: *{CARD_HOLDER}*\n\n"
+        f"📝 Комментарий к переводу:\n"
+        f"`LAW-{order_id}`\n\n"
+        "⏳ После перевода бот *автоматически* подготовит документ "
+        "в течение ~1 минуты.",
+        parse_mode="Markdown"
+    )
+
+    await state.set_state(Form.waiting_transfer)
+
+    # 🔁 АВТОМАТ (ожидание)
+    asyncio.create_task(auto_generate(msg.chat.id, state))
+
+# ================== АВТОГЕНЕРАЦИЯ ==================
+async def auto_generate(chat_id: int, state: FSMContext):
+    await asyncio.sleep(60)  # время на перевод
+
+    data = await state.get_data()
+    if not data:
         return
 
-    thinking = await update.message.reply_text("Генерирую документ…")
-    document = await generate_document(update.message.text, context.user_data["service"])
+    docx, pdf = generate_docs(data)
 
-    if not document:
-        await thinking.edit_text("Ошибка сервиса. Попробуйте позже.")
-        return
-
-    safe_doc = html.escape(document)
-
-    if len(document) > 3800:
-        with open("document.txt", "w", encoding="utf-8") as f:
-            f.write(document)
-        await thinking.delete()
-        await update.message.reply_document(
-            open("document.txt", "rb"),
-            filename="документ.txt",
-            caption=f"{document_templates[context.user_data['service']]['name']}\n\nОплата: 2200 7007 0401 2581"
-        )
-        os.remove("document.txt")
-    else:
-        await thinking.edit_text(
-            f"<b>ГОТОВО!</b>\n\n<b>{document_templates[context.user_data['service']]['name']}</b>\n\n{safe_doc}\n\n<b>Оплата:</b> <code>2200 7007 0401 2581</code>",
-            parse_mode="HTML"
-        )
-
-    context.user_data.clear()
-
-# Основная функция
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    webhook_url = f"https://lawyer-bot-2025.onrender.com/{BOT_TOKEN}"
-    logger.info(f"Бот запущен на webhook: {webhook_url}")
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
-        url_path=BOT_TOKEN,
-        webhook_url=webhook_url
+    await bot.send_message(
+        chat_id,
+        "✅ Оплата принята.\n"
+        "Документы готовы:"
     )
+    await bot.send_document(chat_id, FSInputFile(docx))
+    await bot.send_document(chat_id, FSInputFile(pdf))
+
+    await state.clear()
+
+# ================== ГЕНЕРАЦИЯ ДОКУМЕНТОВ ==================
+def generate_docs(data):
+    name, _ = CATEGORIES[data["category"]]
+
+    text = (
+        f"{name.upper()}\n\n"
+        f"ФИО: {data['fio']}\n"
+        f"Адрес: {data['address']}\n"
+        f"Телефон: {data['phone']}\n\n"
+        f"Суть обращения:\n{data['details']}\n\n"
+        f"Дата: {datetime.now().strftime('%d.%m.%Y')}\n"
+        f"Подпись: ____________________"
+    )
+
+    base = f"doc_{uuid.uuid4().hex[:8]}"
+    docx_path = f"{OUT_DIR}/{base}.docx"
+    pdf_path = f"{OUT_DIR}/{base}.pdf"
+
+    # DOCX
+    doc = Document()
+    for line in text.split("\n"):
+        doc.add_paragraph(line)
+    doc.save(docx_path)
+
+    # PDF
+    c = canvas.Canvas(pdf_path, pagesize=A4)
+    y = 800
+    for line in text.split("\n"):
+        c.drawString(40, y, line)
+        y -= 14
+    c.save()
+
+    return docx_path, pdf_path
+
+# ================== RUN ==================
+async def main():
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

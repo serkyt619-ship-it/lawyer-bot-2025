@@ -1,21 +1,24 @@
 import asyncio
 import os
-from typing import Dict, Optional
+import re
+from typing import Optional, Tuple
 
+import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
-import aiohttp
 
 load_dotenv()
 
+# --- Env ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CARD_NUMBER = os.getenv("CARD_NUMBER", "")
-CARD_HOLDER = os.getenv("CARD_HOLDER", "")
 
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
+
+CARD_NUMBER = os.getenv("CARD_NUMBER", "")
+CARD_HOLDER = os.getenv("CARD_HOLDER", "")
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан")
@@ -24,83 +27,50 @@ if not YANDEX_API_KEY:
 if not YANDEX_FOLDER_ID:
     raise ValueError("YANDEX_FOLDER_ID не задан (Railway Variables)")
 
+# --- Bot ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- Настройки YandexGPT ---
-YANDEX_COMPLETION_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-YANDEX_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest"  # YandexGPT Pro (ветка latest)
-
-# --- Память диалога (простая, без БД) ---
-# user_id -> выбранный тип документа
-pending_doc_type: Dict[int, str] = {}
-
-# --- Кнопки меню ---
+# --- UI ---
 menu_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="📄 Жалоба")],
-        [KeyboardButton(text="⚖️ Исковое заявление")],
-        [KeyboardButton(text="📝 Объяснительная")],
-        [KeyboardButton(text="📑 Ходатайство")],
+        [KeyboardButton(text="🤖 Сгенерировать заявление")],
         [KeyboardButton(text="ℹ️ Оплата")],
-        [KeyboardButton(text="🤖 ИИ: Сгенерировать документ")],
+        [KeyboardButton(text="🆘 Помощь")],
     ],
     resize_keyboard=True
 )
 
-doc_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📄 Жалоба"), KeyboardButton(text="⚖️ Исковое заявление")],
-        [KeyboardButton(text="📝 Объяснительная"), KeyboardButton(text="📑 Ходатайство")],
-        [KeyboardButton(text="⬅️ Назад")],
-    ],
-    resize_keyboard=True
-)
+# --- YandexGPT settings ---
+YANDEX_COMPLETION_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+YANDEX_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest"
 
+TIMEOUT = aiohttp.ClientTimeout(total=75)
 
-def build_prompt(doc_type: str, user_text: str) -> str:
-    """
-    Формируем промпт: ИИ генерирует документ в официальном стиле с пустыми полями.
-    """
-    return f"""
-Сгенерируй документ на русском языке: "{doc_type}".
-Стиль: официальный, юридический, максимально понятный.
+# --- Helpers ---
+def strip_tg(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
 
-Требования:
-1) Добавь "шапку" с полями:
-   - Куда: (орган/суд/организация — оставить пустым)
-   - От кого: ФИО, адрес, телефон, e-mail — оставить пустым
-2) Далее: "Заявление/Жалоба/Иск/Ходатайство" (по типу документа)
-3) Изложи обстоятельства по тексту пользователя (ниже), но аккуратно и структурировано.
-4) Добавь правовую часть: упомяни, что заявитель просит рассмотреть обращение и принять меры согласно законодательству РФ (без точных статей, если не уверен).
-5) Добавь просительную часть пунктами (3–6 пунктов, по смыслу).
-6) В конце: "Приложения:" (список примерных приложений по смыслу) + "Дата/Подпись".
-7) Не выдумывай факты — используй только то, что есть в описании.
-8) Добавь короткую приписку в конце: "Это не является юридической консультацией. Для точности обратитесь к юристу."
+def safe_len(text: str) -> int:
+    return len(text.encode("utf-8"))
 
-Описание пользователя:
-{user_text}
-""".strip()
+def chunk_text(s: str, chunk_size: int = 3500):
+    # Telegram message limit ~4096 chars; держим запас
+    for i in range(0, len(s), chunk_size):
+        yield s[i:i + chunk_size]
 
-
-async def yandexgpt_generate(doc_type: str, user_text: str) -> str:
-    """
-    Вызов YandexGPT через REST completion.
-    Auth: Authorization: Api-Key <API_key>
-    """
-    prompt = build_prompt(doc_type, user_text)
-
+async def yandexgpt_completion(system_text: str, user_text: str, max_tokens: int = 1800, temperature: float = 0.2) -> Tuple[bool, str]:
     body = {
         "modelUri": YANDEX_MODEL_URI,
         "completionOptions": {
             "stream": False,
-            "temperature": 0.3,
-            "maxTokens": "1800",
+            "temperature": temperature,
+            "maxTokens": str(max_tokens),
             "reasoningOptions": {"mode": "DISABLED"},
         },
         "messages": [
-            {"role": "system", "text": "Ты аккуратный юридический помощник. Пишешь официально и структурировано."},
-            {"role": "user", "text": prompt},
+            {"role": "system", "text": system_text},
+            {"role": "user", "text": user_text},
         ],
     }
 
@@ -109,149 +79,156 @@ async def yandexgpt_generate(doc_type: str, user_text: str) -> str:
         "Content-Type": "application/json",
     }
 
-    timeout = aiohttp.ClientTimeout(total=60)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
         async with session.post(YANDEX_COMPLETION_URL, json=body, headers=headers) as resp:
-            text = await resp.text()
+            raw = await resp.text()
             if resp.status != 200:
-                # Возвращаем понятную ошибку
-                return f"❌ Ошибка YandexGPT (HTTP {resp.status}). Ответ:\n{text}"
+                return False, f"❌ Ошибка YandexGPT (HTTP {resp.status}).\n{raw}"
+            try:
+                data = await resp.json()
+                text = data["result"]["alternatives"][0]["message"]["text"]
+                return True, text
+            except Exception:
+                return False, f"❌ Не смог разобрать ответ YandexGPT.\n{raw}"
 
-            data = await resp.json()
+async def detect_doc_type(problem_text: str) -> str:
+    """
+    Вариант B: бот сам определяет тип документа.
+    Возвращает одно из:
+    ЖАЛОБА | ИСКОВОЕ ЗАЯВЛЕНИЕ | ХОДАТАЙСТВО | ОБЪЯСНИТЕЛЬНАЯ | ПРЕТЕНЗИЯ
+    """
+    system = (
+        "Ты юридический классификатор. "
+        "Верни ТОЛЬКО ОДНО значение строго из списка:\n"
+        "ЖАЛОБА\nИСКОВОЕ ЗАЯВЛЕНИЕ\nХОДАТАЙСТВО\nОБЪЯСНИТЕЛЬНАЯ\nПРЕТЕНЗИЯ\n\n"
+        "Правила:\n"
+        "- Если спор с продавцом/услугой/деньгами и сначала досудебно — ПРЕТЕНЗИЯ.\n"
+        "- Если в суд — ИСКОВОЕ ЗАЯВЛЕНИЕ.\n"
+        "- Если обращение в госорган/инстанцию — ЖАЛОБА.\n"
+        "- Если просьба суду/следствию/органу о процессуальном действии — ХОДАТАЙСТВО.\n"
+        "- Если объяснить инцидент работодателю/полиции — ОБЪЯСНИТЕЛЬНАЯ.\n"
+        "Никаких пояснений, только одно слово/строка из списка."
+    )
+    ok, out = await yandexgpt_completion(system, problem_text, max_tokens=40, temperature=0.0)
+    if not ok:
+        # если классификация упала — дефолт
+        return "ЖАЛОБА"
+    out = strip_tg(out).upper()
+    # нормализуем
+    allowed = {"ЖАЛОБА", "ИСКОВОЕ ЗАЯВЛЕНИЕ", "ХОДАТАЙСТВО", "ОБЪЯСНИТЕЛЬНАЯ", "ПРЕТЕНЗИЯ"}
+    # иногда модель может вернуть с точкой/кавычками
+    out = re.sub(r'[^А-ЯЁ\s]', '', out).strip()
+    if out in allowed:
+        return out
+    # попробуем частичные совпадения
+    for a in allowed:
+        if a in out:
+            return a
+    return "ЖАЛОБА"
 
-    # В ответе обычно: result -> alternatives[0] -> message -> text
-    try:
-        return data["result"]["alternatives"][0]["message"]["text"]
-    except Exception:
-        return f"❌ Не смог разобрать ответ YandexGPT.\nСырой ответ:\n{text}"
+def build_generation_prompt(doc_type: str, user_text: str) -> str:
+    return f"""
+Сгенерируй документ на русском языке: "{doc_type}" по описанию ниже.
 
+Требования к документу:
+1) Официальный юридический стиль, понятно и структурировано.
+2) В начале "шапка" с полями (оставить пустыми):
+   - Куда: (орган/суд/организация)
+   - От: ФИО
+   - Адрес
+   - Телефон
+   - E-mail
+3) Далее заголовок документа.
+4) Блок "Обстоятельства" — изложи факты из описания пользователя (не выдумывай).
+5) Блок "Правовое обоснование" — общие формулировки про законодательство РФ (без точных статей, если не уверен).
+6) Блок "Прошу" — 3–7 пунктов по смыслу.
+7) "Приложения" — примерный список по смыслу (если уместно).
+8) В конце: Дата/Подпись.
+9) В конце добавь: "Это не является юридической консультацией. Для точности обратитесь к юристу."
 
-# --- Команды/меню ---
+Описание пользователя:
+{user_text}
+""".strip()
+
+async def generate_document(doc_type: str, user_text: str) -> Tuple[bool, str]:
+    system = "Ты аккуратный юридический помощник. Пишешь официально, структурировано, без выдуманных фактов."
+    prompt = build_generation_prompt(doc_type, user_text)
+    return await yandexgpt_completion(system, prompt, max_tokens=2000, temperature=0.25)
+
+# --- Handlers ---
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    pending_doc_type.pop(message.from_user.id, None)
     await message.answer(
         "👋 Привет!\n\n"
-        "Я юрист-бот. Могу:\n"
-        "• показать оплату\n"
-        "• сгенерировать документ (обычный шаблон)\n"
-        "• 🤖 сгенерировать документ через ИИ (YandexGPT)\n\n"
-        "Выбирай 👇",
+        "Напиши свою ситуацию (что случилось и чего хочешь), а я:\n"
+        "• сам выберу тип документа\n"
+        "• сгенерирую заявление через ИИ (YandexGPT)\n\n"
+        "Нажми кнопку или просто напиши текст 👇",
         reply_markup=menu_kb
     )
 
+@dp.message(lambda m: m.text == "🆘 Помощь")
+async def help_handler(message: types.Message):
+    await message.answer(
+        "Как пользоваться:\n"
+        "1) Нажми «🤖 Сгенерировать заявление» или просто напиши проблему.\n"
+        "2) Укажи: кто/что/где/когда, суммы/даты, чего хочешь добиться.\n\n"
+        "Команды:\n"
+        "/start — меню\n",
+        reply_markup=menu_kb
+    )
 
 @dp.message(lambda m: m.text == "ℹ️ Оплата")
-async def payment_info(message: types.Message):
+async def payment_handler(message: types.Message):
     await message.answer(
         "💳 Оплата переводом на карту:\n\n"
         f"Номер карты: {CARD_NUMBER}\n"
         f"Получатель: {CARD_HOLDER}\n\n"
-        "После оплаты можешь выбрать документ или генерацию через ИИ."
-    )
-
-
-# Быстрый шаблон (без ИИ)
-async def send_simple_template(message: types.Message, doc_type: str):
-    text = (
-        f"{doc_type}\n\n"
-        "Куда: ______________________\n"
-        "От: ________________________\n"
-        "Адрес: ______________________\n"
-        "Телефон: ____________________\n"
-        "E-mail: _____________________\n\n"
-        "Текст:\n"
-        "Прошу рассмотреть настоящее обращение и принять меры в соответствии с законодательством РФ.\n\n"
-        "Приложения:\n"
-        "1) _________________________\n"
-        "2) _________________________\n\n"
-        "Дата: ____________    Подпись: ____________\n"
-    )
-    await message.answer(f"✅ Шаблон готов:\n\n{text}")
-
-
-@dp.message(lambda m: m.text in ["📄 Жалоба", "⚖️ Исковое заявление", "📝 Объяснительная", "📑 Ходатайство"])
-async def doc_templates(message: types.Message):
-    await send_simple_template(message, message.text.replace("📄 ", "").replace("⚖️ ", "").replace("📝 ", "").replace("📑 ", ""))
-
-
-# --- ИИ режим ---
-@dp.message(lambda m: m.text == "🤖 ИИ: Сгенерировать документ")
-async def ai_start(message: types.Message):
-    pending_doc_type[message.from_user.id] = ""  # пока пусто
-    await message.answer(
-        "🤖 Ок! Выбери тип документа:",
-        reply_markup=doc_kb
-    )
-
-
-@dp.message(lambda m: m.text == "⬅️ Назад")
-async def back_to_menu(message: types.Message):
-    pending_doc_type.pop(message.from_user.id, None)
-    await message.answer("Ок, вернулись в меню 👇", reply_markup=menu_kb)
-
-
-@dp.message(lambda m: m.text in ["📄 Жалоба", "⚖️ Исковое заявление", "📝 Объяснительная", "📑 Ходатайство"])
-async def ai_choose_doc(message: types.Message):
-    uid = message.from_user.id
-    if uid in pending_doc_type:
-        # Это выбор типа для ИИ
-        doc_type = message.text.replace("📄 ", "").replace("⚖️ ", "").replace("📝 ", "").replace("📑 ", "")
-        pending_doc_type[uid] = doc_type
-        await message.answer(
-            f"✅ Тип выбран: {doc_type}\n\n"
-            "Теперь опиши ситуацию одним сообщением:\n"
-            "• кто/что/где/когда\n"
-            "• что хочешь получить в итоге\n"
-            "• если есть даты/суммы — укажи\n\n"
-            "Я сгенерирую документ через ИИ.",
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[[KeyboardButton(text="⬅️ Назад")]],
-                resize_keyboard=True
-            )
-        )
-    else:
-        # Это не ИИ-режим — уже обработано как шаблон выше
-        pass
-
-
-@dp.message()
-async def ai_generate_or_fallback(message: types.Message):
-    uid = message.from_user.id
-
-    # Если пользователь в режиме ИИ и уже выбрал тип
-    if uid in pending_doc_type and pending_doc_type[uid]:
-        doc_type = pending_doc_type[uid]
-        user_text = message.text.strip()
-
-        if len(user_text) < 15:
-            await message.answer("Слишком коротко. Напиши чуть подробнее (минимум пару предложений).")
-            return
-
-        await message.answer("⏳ Генерирую документ через ИИ...")
-
-        result = await yandexgpt_generate(doc_type, user_text)
-
-        # Сбрасываем режим после генерации
-        pending_doc_type.pop(uid, None)
-
-        # Отправляем результат (если очень длинный — Telegram сам порежет, но обычно нормально)
-        await message.answer(result, reply_markup=menu_kb)
-        return
-
-    # Иначе — подсказка
-    await message.answer(
-        "Выбери действие в меню 👇\n\n"
-        "Если хочешь ИИ — нажми: 🤖 ИИ: Сгенерировать документ",
+        "После оплаты просто опиши ситуацию — я сгенерирую документ.",
         reply_markup=menu_kb
     )
 
+@dp.message(lambda m: m.text == "🤖 Сгенерировать заявление")
+async def gen_button_handler(message: types.Message):
+    await message.answer(
+        "Ок ✅\n\n"
+        "Напиши свою ситуацию одним сообщением.\n"
+        "Пример: «Купил товар, он сломался, продавец не возвращает деньги, хочу вернуть деньги и неустойку…»",
+        reply_markup=menu_kb
+    )
 
+@dp.message()
+async def free_text_handler(message: types.Message):
+    user_text = strip_tg(message.text)
+    if not user_text:
+        return
+
+    # фильтр на слишком короткие сообщения
+    if len(user_text) < 15:
+        await message.answer("Напиши чуть подробнее (минимум 2–3 предложения).", reply_markup=menu_kb)
+        return
+
+    await message.answer("⏳ Анализирую и выбираю тип документа...")
+    doc_type = await detect_doc_type(user_text)
+
+    await message.answer(f"✅ Определил тип: **{doc_type}**\n\n⏳ Генерирую документ...", parse_mode="Markdown")
+
+    ok, result = await generate_document(doc_type, user_text)
+    if not ok:
+        await message.answer(result, reply_markup=menu_kb)
+        return
+
+    # отправляем длинные ответы кусками
+    for part in chunk_text(result):
+        await message.answer(part)
+
+    await message.answer("Готово ✅ Если хочешь — напиши уточнения/факты, я перегенерирую.", reply_markup=menu_kb)
+
+# --- Run ---
 async def main():
-    # чтобы не было TelegramConflictError (webhook vs polling)
+    # чтобы не было TelegramConflictError
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

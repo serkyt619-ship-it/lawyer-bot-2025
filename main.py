@@ -9,7 +9,10 @@ from typing import Dict, Optional, Tuple
 import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 
 # =========================
 # ENV (Railway Variables)
@@ -18,8 +21,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY", "").strip()
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID", "").strip()
 
-CARD_NUMBER = os.environ.get("CARD_NUMBER", "").strip()       # <-- ПОЛНЫЙ номер карты
-CARD_HOLDER = os.environ.get("CARD_HOLDER", "").strip()       # <-- Получатель
+CARD_NUMBER = os.environ.get("CARD_NUMBER", "").strip()   # полный номер
+CARD_HOLDER = os.environ.get("CARD_HOLDER", "").strip()
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан (Railway Variables)")
@@ -115,7 +118,6 @@ def expired(created_at: int) -> bool:
 # Helpers
 # =========================
 def unique_amount(base_rub: int) -> int:
-    # уникальные копейки, чтобы "жёстче" отличать оплаты
     return base_rub * 100 + random.randint(11, 99)
 
 def fmt_amount(amount_cents: int) -> str:
@@ -131,7 +133,6 @@ def parse_confirm(text: str) -> Tuple[Optional[int], Optional[str]]:
     m_code = re.search(r"(LAW-[A-Z]+-\d+)", t)
     code = m_code.group(1) if m_code else None
 
-    # сумма вида 399.45 или 399,45
     m_amt = re.search(r"(\d{2,6})[.,](\d{2})", t)
     if not m_amt:
         return None, code
@@ -236,7 +237,7 @@ async def price(message: types.Message):
 
 @dp.message(lambda m: m.text == "ℹ️ Оплата")
 async def pay_info(message: types.Message):
-    # ВАЖНО: без Markdown и без маски — выводим полностью
+    # ПОЛНЫЙ номер карты (без ****)
     await message.answer(
         "Оплата переводом на карту:\n\n"
         "Номер карты:\n"
@@ -280,7 +281,7 @@ async def cat_select(call: types.CallbackQuery):
     code = make_code(uid, key)
     save_order(uid, key, amount_cents, code)
 
-    # ВАЖНО: тут тоже выводим ПОЛНУЮ карту
+    # ПОЛНЫЙ номер карты (без ****) — и тут тоже
     await call.message.answer(
         f"Оплата: {cat['title']}\n\n"
         f"Точная сумма: {fmt_amount(amount_cents)} ₽\n\n"
@@ -314,7 +315,6 @@ async def all_text(message: types.Message):
         await message.answer("Время оплаты истекло. Выбери категорию заново.", reply_markup=menu_kb)
         return
 
-    # Если не оплачено — ждём подтверждение
     if paid == 0:
         amt_in, code_in = parse_confirm(text)
         if amt_in is None or code_in is None:
@@ -328,7 +328,6 @@ async def all_text(message: types.Message):
         await message.answer("Оплата подтверждена ✅\n\nТеперь напиши ситуацию одним сообщением.", reply_markup=menu_kb)
         return
 
-    # Оплачено — генерируем документ
     if len(text) < 15:
         await message.answer("Напиши чуть подробнее (2–3 предложения).", reply_markup=menu_kb)
         return
@@ -347,13 +346,19 @@ async def all_text(message: types.Message):
     await message.answer("Готово ✅", reply_markup=menu_kb)
 
 # =========================
-# RUN
+# RUN (anti-conflict loop)
 # =========================
 async def main():
     db_init()
-    # Важно для Railway: убираем вебхук, чтобы polling работал без конфликтов
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+
+    # Защита от конфликтов/рестартов: не падаем, а ждём и повторяем
+    while True:
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        except Exception as e:
+            print(f"Polling error: {e}")
+            await asyncio.sleep(3)
 
 if __name__ == "__main__":
     asyncio.run(main())

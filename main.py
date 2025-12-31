@@ -18,18 +18,18 @@ from aiogram.types import (
 # ENV (Railway Variables)
 # =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY", "").strip()
-YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID", "").strip()
+
+# Google Gemini
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
 
 CARD_NUMBER = os.environ.get("CARD_NUMBER", "").strip()   # полный номер
 CARD_HOLDER = os.environ.get("CARD_HOLDER", "").strip()
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан (Railway Variables)")
-if not YANDEX_API_KEY:
-    raise ValueError("YANDEX_API_KEY не задан (Railway Variables)")
-if not YANDEX_FOLDER_ID:
-    raise ValueError("YANDEX_FOLDER_ID не задан (Railway Variables)")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY не задан (Railway Variables)")
 if not CARD_NUMBER:
     raise ValueError("CARD_NUMBER не задан (Railway Variables)")
 if not CARD_HOLDER:
@@ -50,10 +50,9 @@ ORDER_TTL_MINUTES = 30
 DB_PATH = "payments.db"
 
 # =========================
-# YandexGPT
+# Google Gemini API
 # =========================
-YANDEX_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-YANDEX_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 TIMEOUT = aiohttp.ClientTimeout(total=75)
 
 # =========================
@@ -169,25 +168,49 @@ def build_prompt(category_key: str, user_text: str) -> str:
 {user_text}
 """.strip()
 
-async def yandexgpt(system_text: str, user_text: str) -> Tuple[bool, str]:
+async def gemini(system_text: str, user_text: str) -> Tuple[bool, str]:
+    """
+    Google Gemini generateContent
+    """
+    params = {"key": GEMINI_API_KEY}
+    headers = {"Content-Type": "application/json"}
+
     body = {
-        "modelUri": YANDEX_MODEL_URI,
-        "completionOptions": {"stream": False, "temperature": 0.25, "maxTokens": "2200"},
-        "messages": [{"role": "system", "text": system_text}, {"role": "user", "text": user_text}],
+        # system instruction (как "system" роль)
+        "systemInstruction": {
+            "parts": [{"text": system_text}]
+        },
+        "contents": [
+            {"role": "user", "parts": [{"text": user_text}]}
+        ],
+        "generationConfig": {
+            "temperature": 0.25,
+            "maxOutputTokens": 2200,
+        }
     }
-    headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
 
     async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
-        async with session.post(YANDEX_URL, json=body, headers=headers) as resp:
+        async with session.post(GEMINI_URL, params=params, json=body, headers=headers) as resp:
             raw = await resp.text()
             if resp.status != 200:
-                return False, f"Ошибка YandexGPT (HTTP {resp.status}).\n{raw}"
+                return False, f"Ошибка Gemini (HTTP {resp.status}).\n{raw}"
+
             try:
                 data = await resp.json()
-                text = data["result"]["alternatives"][0]["message"]["text"]
+                # Обычно: candidates[0].content.parts[*].text
+                candidates = data.get("candidates") or []
+                if not candidates:
+                    return False, f"Gemini вернул пустой ответ.\n{raw}"
+
+                parts = (candidates[0].get("content") or {}).get("parts") or []
+                text = "".join([p.get("text", "") for p in parts]).strip()
+
+                if not text:
+                    return False, f"Gemini вернул пустой текст.\n{raw}"
+
                 return True, text
             except Exception:
-                return False, f"Не смог разобрать ответ YandexGPT.\n{raw}"
+                return False, f"Не смог разобрать ответ Gemini.\n{raw}"
 
 # =========================
 # Bot init
@@ -237,7 +260,6 @@ async def price(message: types.Message):
 
 @dp.message(lambda m: m.text == "ℹ️ Оплата")
 async def pay_info(message: types.Message):
-    # ПОЛНЫЙ номер карты (без ****)
     await message.answer(
         "Оплата переводом на карту:\n\n"
         "Номер карты:\n"
@@ -281,7 +303,6 @@ async def cat_select(call: types.CallbackQuery):
     code = make_code(uid, key)
     save_order(uid, key, amount_cents, code)
 
-    # ПОЛНЫЙ номер карты (без ****) — и тут тоже
     await call.message.answer(
         f"Оплата: {cat['title']}\n\n"
         f"Точная сумма: {fmt_amount(amount_cents)} ₽\n\n"
@@ -333,7 +354,7 @@ async def all_text(message: types.Message):
         return
 
     await message.answer("Генерирую документ…")
-    ok, result = await yandexgpt(
+    ok, result = await gemini(
         system_text="Ты аккуратный юридический помощник. Не выдумывай факты. Пиши официально и структурно.",
         user_text=build_prompt(key, text),
     )
@@ -352,7 +373,6 @@ async def main():
     db_init()
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # Защита от конфликтов/рестартов: не падаем, а ждём и повторяем
     while True:
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

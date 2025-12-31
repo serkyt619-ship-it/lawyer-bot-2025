@@ -23,17 +23,20 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
 
-CARD_NUMBER = os.environ.get("CARD_NUMBER", "").strip()   # полный номер
+CARD_NUMBER = os.environ.get("CARD_NUMBER", "").strip()
 CARD_HOLDER = os.environ.get("CARD_HOLDER", "").strip()
 
+# ЖЁСТКО требуем только токен бота — иначе вообще нечему работать
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан (Railway Variables)")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY не задан (Railway Variables)")
+
+# Остальные переменные НЕ валим запуск, а предупреждаем
 if not CARD_NUMBER:
-    raise ValueError("CARD_NUMBER не задан (Railway Variables)")
+    print("WARNING: CARD_NUMBER не задан (оплата будет недоступна)")
 if not CARD_HOLDER:
-    raise ValueError("CARD_HOLDER не задан (Railway Variables)")
+    print("WARNING: CARD_HOLDER не задан (оплата будет недоступна)")
+if not GEMINI_API_KEY:
+    print("WARNING: GEMINI_API_KEY не задан (генерация будет недоступна)")
 
 # =========================
 # Pricing (5 categories)
@@ -169,24 +172,21 @@ def build_prompt(category_key: str, user_text: str) -> str:
 """.strip()
 
 async def gemini(system_text: str, user_text: str) -> Tuple[bool, str]:
-    """
-    Google Gemini generateContent
-    """
+    if not GEMINI_API_KEY:
+        return False, (
+            "❌ Gemini не настроен: переменная GEMINI_API_KEY не задана.\n\n"
+            "✅ Добавь в Railway → Service → Variables:\n"
+            "GEMINI_API_KEY = твой ключ из Google AI Studio\n"
+            "Затем сделай Redeploy."
+        )
+
     params = {"key": GEMINI_API_KEY}
     headers = {"Content-Type": "application/json"}
 
     body = {
-        # system instruction (как "system" роль)
-        "systemInstruction": {
-            "parts": [{"text": system_text}]
-        },
-        "contents": [
-            {"role": "user", "parts": [{"text": user_text}]}
-        ],
-        "generationConfig": {
-            "temperature": 0.25,
-            "maxOutputTokens": 2200,
-        }
+        "systemInstruction": {"parts": [{"text": system_text}]},
+        "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+        "generationConfig": {"temperature": 0.25, "maxOutputTokens": 2200},
     }
 
     async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
@@ -194,10 +194,8 @@ async def gemini(system_text: str, user_text: str) -> Tuple[bool, str]:
             raw = await resp.text()
             if resp.status != 200:
                 return False, f"Ошибка Gemini (HTTP {resp.status}).\n{raw}"
-
             try:
                 data = await resp.json()
-                # Обычно: candidates[0].content.parts[*].text
                 candidates = data.get("candidates") or []
                 if not candidates:
                     return False, f"Gemini вернул пустой ответ.\n{raw}"
@@ -207,7 +205,6 @@ async def gemini(system_text: str, user_text: str) -> Tuple[bool, str]:
 
                 if not text:
                     return False, f"Gemini вернул пустой текст.\n{raw}"
-
                 return True, text
             except Exception:
                 return False, f"Не смог разобрать ответ Gemini.\n{raw}"
@@ -223,6 +220,7 @@ menu_kb = ReplyKeyboardMarkup(
         [KeyboardButton(text="🤖 Сгенерировать документ")],
         [KeyboardButton(text="💰 Прайс")],
         [KeyboardButton(text="ℹ️ Оплата")],
+        [KeyboardButton(text="🧪 Проверка (ENV)")],
     ],
     resize_keyboard=True
 )
@@ -243,6 +241,21 @@ def price_text() -> str:
     lines.append("\nОплата: перевод на карту + подтверждение суммой и кодом.")
     return "\n".join(lines)
 
+@dp.message(Command("check"))
+async def check_cmd(message: types.Message):
+    await message.answer(
+        "Проверка переменных:\n\n"
+        f"BOT_TOKEN: {'✅' if bool(BOT_TOKEN) else '❌'}\n"
+        f"GEMINI_API_KEY: {'✅' if bool(GEMINI_API_KEY) else '❌'}\n"
+        f"GEMINI_MODEL: {GEMINI_MODEL}\n"
+        f"CARD_NUMBER: {'✅' if bool(CARD_NUMBER) else '❌'}\n"
+        f"CARD_HOLDER: {'✅' if bool(CARD_HOLDER) else '❌'}\n"
+    )
+
+@dp.message(lambda m: m.text == "🧪 Проверка (ENV)")
+async def check_btn(message: types.Message):
+    await check_cmd(message)
+
 # =========================
 # Handlers
 # =========================
@@ -260,6 +273,14 @@ async def price(message: types.Message):
 
 @dp.message(lambda m: m.text == "ℹ️ Оплата")
 async def pay_info(message: types.Message):
+    if not CARD_NUMBER or not CARD_HOLDER:
+        await message.answer(
+            "❌ Оплата не настроена.\n"
+            "Добавь CARD_NUMBER и CARD_HOLDER в Railway → Variables и сделай Redeploy.",
+            reply_markup=menu_kb
+        )
+        return
+
     await message.answer(
         "Оплата переводом на карту:\n\n"
         "Номер карты:\n"
@@ -295,6 +316,13 @@ async def cat_select(call: types.CallbackQuery):
     if is_paid(uid, key):
         await call.message.answer(
             f"Доступ активен: {cat['title']}\n\nНапиши ситуацию одним сообщением.",
+            reply_markup=menu_kb
+        )
+        return
+
+    if not CARD_NUMBER or not CARD_HOLDER:
+        await call.message.answer(
+            "❌ Оплата не настроена (CARD_NUMBER/CARD_HOLDER отсутствуют).",
             reply_markup=menu_kb
         )
         return

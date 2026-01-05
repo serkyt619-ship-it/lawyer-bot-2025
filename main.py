@@ -21,22 +21,20 @@ from aiogram.exceptions import TelegramConflictError
 # =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
-# Gemini API key (Google AI Studio / Generative Language API)
+# Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-
-# Можно указать вручную, но код умеет авто-подбор через ListModels
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
 
-# Оплата
-CARD_NUMBER = os.environ.get("CARD_NUMBER", "").strip()   # полный номер
-CARD_HOLDER = os.environ.get("CARD_HOLDER", "").strip()
-SHOW_FULL_CARD = os.environ.get("SHOW_FULL_CARD", "0").strip() in ("1", "true", "True", "YES", "yes")
+# СБП реквизиты
+SBP_PHONE = os.environ.get("SBP_PHONE", "").strip()
+SBP_BANK = os.environ.get("SBP_BANK", "").strip()
+SBP_HOLDER = os.environ.get("SBP_HOLDER", "").strip()
+SBP_NOTE = os.environ.get("SBP_NOTE", "Оплата услуги").strip()
 
 # Разное
 DB_PATH = os.environ.get("DB_PATH", "payments.db").strip()
 ORDER_TTL_MINUTES = int(os.environ.get("ORDER_TTL_MINUTES", "30").strip() or "30")
 
-# Таймауты/ретраи
 HTTP_TIMEOUT_SEC = int(os.environ.get("HTTP_TIMEOUT_SEC", "75").strip() or "75")
 GEMINI_RETRIES = int(os.environ.get("GEMINI_RETRIES", "2").strip() or "2")
 POLL_RESTART_DELAY_SEC = float(os.environ.get("POLL_RESTART_DELAY_SEC", "3").strip() or "3")
@@ -44,11 +42,11 @@ POLL_RESTART_DELAY_SEC = float(os.environ.get("POLL_RESTART_DELAY_SEC", "3").str
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан (Railway Variables)")
 
-if not CARD_NUMBER:
-    # не валим бота — просто предупредим позже в /start и оплате
-    pass
-if not CARD_HOLDER:
-    pass
+if not GEMINI_API_KEY:
+    print("WARNING: GEMINI_API_KEY не задан (генерация будет недоступна)")
+
+if not SBP_PHONE or not SBP_BANK or not SBP_HOLDER:
+    print("WARNING: SBP_PHONE / SBP_BANK / SBP_HOLDER не заданы (оплата СБП будет недоступна)")
 
 
 # =========================
@@ -68,8 +66,6 @@ CATEGORIES: Dict[str, Dict] = {
 # =========================
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 TIMEOUT = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SEC)
-
-# Подобранная рабочая модель (если указанная не подходит)
 RUNTIME_MODEL: Optional[str] = None
 
 
@@ -162,6 +158,31 @@ def chunk_text(s: str, chunk_size: int = 3500):
     for i in range(0, len(s), chunk_size):
         yield s[i:i + chunk_size]
 
+def normalize_phone(phone: str) -> str:
+    p = (phone or "").strip().replace(" ", "").replace("-", "")
+    # оставим + если есть, иначе добавим
+    if p and p[0] != "+":
+        # если начинается с 8/7, оставим как есть; иначе +7 как типовой
+        if p.startswith("8"):
+            p = "+7" + p[1:]
+        elif p.startswith("7"):
+            p = "+" + p
+        else:
+            p = "+7" + p
+    return p
+
+def sbp_text() -> str:
+    if not SBP_PHONE or not SBP_BANK or not SBP_HOLDER:
+        return "СБП не настроена."
+    phone = normalize_phone(SBP_PHONE)
+    return (
+        f"📲 СБП (по номеру телефона)\n"
+        f"Телефон: {phone}\n"
+        f"Банк: {SBP_BANK}\n"
+        f"Получатель: {SBP_HOLDER}\n"
+        f"Назначение: {SBP_NOTE}"
+    )
+
 def build_prompt(category_key: str, user_text: str) -> str:
     titles = {
         "police": "ЗАЯВЛЕНИЕ О ПРЕСТУПЛЕНИИ",
@@ -187,19 +208,6 @@ def build_prompt(category_key: str, user_text: str) -> str:
 {user_text}
 """.strip()
 
-def mask_card(card: str) -> str:
-    # 2200 7000 0000 0000 -> **** **** **** 0000
-    digits = re.sub(r"\D+", "", card or "")
-    if len(digits) < 8:
-        return card
-    last4 = digits[-4:]
-    return f"**** **** **** {last4}"
-
-def card_text() -> str:
-    if not CARD_NUMBER:
-        return "Номер карты не настроен."
-    return CARD_NUMBER if SHOW_FULL_CARD else mask_card(CARD_NUMBER)
-
 
 # =========================
 # Gemini: model discovery + generateContent
@@ -220,19 +228,12 @@ async def gemini_list_models(session: aiohttp.ClientSession) -> Tuple[bool, str,
             return False, f"ListModels: не смог разобрать JSON.\n{raw}", None
 
 def pick_best_model(models: list) -> Optional[str]:
-    """
-    Выбираем модель, которая поддерживает generateContent.
-    Приоритет:
-    - gemini-1.5-flash (любая вариация)
-    - gemini-1.5-pro
-    - любая gemini
-    """
     if not models:
         return None
 
     candidates = []
     for m in models:
-        name = m.get("name")  # например: "models/gemini-1.5-flash"
+        name = m.get("name")
         methods = m.get("supportedGenerationMethods", []) or []
         if not name:
             continue
@@ -249,6 +250,8 @@ def pick_best_model(models: list) -> Optional[str]:
             return 300
         if "gemini-1.5-pro" in nlow:
             return 200
+        if "gemini-1.0-pro" in nlow:
+            return 150
         if "gemini" in nlow:
             return 100
         return 0
@@ -258,32 +261,29 @@ def pick_best_model(models: list) -> Optional[str]:
 
 async def ensure_runtime_model(session: aiohttp.ClientSession) -> Optional[str]:
     global RUNTIME_MODEL
-
-    # Если уже подобрана — используем
     if RUNTIME_MODEL:
         return RUNTIME_MODEL
 
-    # Пытаемся использовать указанную
-    RUNTIME_MODEL = f"models/{GEMINI_MODEL}" if not GEMINI_MODEL.startswith("models/") else GEMINI_MODEL
+    # Нормализуем: если без "models/" — добавим
+    model = GEMINI_MODEL
+    if not model.startswith("models/"):
+        model = "models/" + model
+    RUNTIME_MODEL = model
     return RUNTIME_MODEL
 
 async def gemini_generate(system_text: str, user_text: str) -> Tuple[bool, str]:
-    """
-    Возвращает (ok, text).
-    Если модель не найдена/не поддерживается — делаем ListModels и подбираем рабочую.
-    """
     if not GEMINI_API_KEY:
         return False, "Генерация недоступна: GEMINI_API_KEY не задан (Railway Variables)."
 
     async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
         await ensure_runtime_model(session)
 
-        # основной запрос + ретраи
         last_error = None
         for attempt in range(GEMINI_RETRIES + 1):
-            model = RUNTIME_MODEL or f"models/{GEMINI_MODEL}"
+            model = RUNTIME_MODEL or "models/gemini-1.5-flash"
             url = f"{GEMINI_BASE}/{model}:generateContent?key={GEMINI_API_KEY}"
 
+            # SystemInstruction тоже можно, но безопаснее и совместимее объединить в один user prompt
             body = {
                 "contents": [
                     {"role": "user", "parts": [{"text": f"{system_text}\n\n{user_text}"}]}
@@ -298,29 +298,23 @@ async def gemini_generate(system_text: str, user_text: str) -> Tuple[bool, str]:
                 async with session.post(url, json=body) as resp:
                     raw = await resp.text()
 
-                    # 404: модель не найдена/не поддерживает метод
                     if resp.status == 404:
-                        # пробуем найти рабочую модель
                         ok, _, models = await gemini_list_models(session)
                         if ok and models:
                             picked = pick_best_model(models)
                             if picked:
                                 RUNTIME_MODEL = picked
-                                # повторим попытку сразу с новой моделью
                                 last_error = f"Модель {model} не подошла, переключился на {picked}."
                                 continue
-                        return False, f"Ошибка Gemini (HTTP 404). Похоже, модель не поддерживается.\n{raw}"
+                        return False, f"Ошибка Gemini (HTTP 404). Модель не поддерживается.\n{raw}"
 
                     if resp.status != 200:
                         last_error = f"Ошибка Gemini (HTTP {resp.status}).\n{raw}"
-                        # небольшой backoff
                         await asyncio.sleep(0.7 * (attempt + 1))
                         continue
 
                     try:
                         data = await resp.json()
-                        # типовой путь ответа:
-                        # candidates[0].content.parts[0].text
                         candidates = data.get("candidates", [])
                         if not candidates:
                             return False, f"Gemini: пустой ответ.\n{raw}"
@@ -357,7 +351,7 @@ menu_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🤖 Сгенерировать документ")],
         [KeyboardButton(text="💰 Прайс")],
-        [KeyboardButton(text="ℹ️ Оплата")],
+        [KeyboardButton(text="ℹ️ Оплата (СБП)")],
     ],
     resize_keyboard=True
 )
@@ -375,7 +369,7 @@ def price_text() -> str:
     lines = ["Прайс:\n"]
     for v in CATEGORIES.values():
         lines.append(f"• {v['title']} — от {v['price']} ₽")
-    lines.append("\nОплата: перевод на карту + подтверждение суммой и кодом.")
+    lines.append("\nОплата: перевод по СБП + подтверждение суммой и кодом.")
     return "\n".join(lines)
 
 
@@ -387,9 +381,10 @@ async def start(message: types.Message):
     warn = []
     if not GEMINI_API_KEY:
         warn.append("⚠️ GEMINI_API_KEY не задан — генерация временно недоступна.")
-    if not CARD_NUMBER or not CARD_HOLDER:
-        warn.append("⚠️ Данные оплаты (CARD_NUMBER/CARD_HOLDER) не настроены.")
-    warn_text = ("\n" + "\n".join(warn)) if warn else ""
+    if not SBP_PHONE or not SBP_BANK or not SBP_HOLDER:
+        warn.append("⚠️ СБП не настроена (SBP_PHONE/SBP_BANK/SBP_HOLDER).")
+
+    warn_text = ("\n\n" + "\n".join(warn)) if warn else ""
 
     await message.answer(
         "Привет! Я помогу составить заявление/жалобу/иск.\n\n"
@@ -401,21 +396,19 @@ async def start(message: types.Message):
 async def price(message: types.Message):
     await message.answer(price_text(), reply_markup=menu_kb)
 
-@dp.message(lambda m: m.text == "ℹ️ Оплата")
+@dp.message(lambda m: m.text == "ℹ️ Оплата (СБП)")
 async def pay_info(message: types.Message):
-    if not CARD_NUMBER or not CARD_HOLDER:
+    if not SBP_PHONE or not SBP_BANK or not SBP_HOLDER:
         await message.answer(
-            "Оплата пока не настроена админом (CARD_NUMBER/CARD_HOLDER).",
+            "Оплата по СБП пока не настроена.\n"
+            "Нужны переменные: SBP_PHONE, SBP_BANK, SBP_HOLDER.",
             reply_markup=menu_kb
         )
         return
 
     await message.answer(
-        "Оплата переводом на карту:\n\n"
-        "Карта:\n"
-        f"{card_text()}\n\n"
-        "Получатель:\n"
-        f"{CARD_HOLDER}\n\n"
+        "Оплата переводом по СБП:\n\n"
+        f"{sbp_text()}\n\n"
         "Сумму и код бот выдаст после выбора категории.",
         reply_markup=menu_kb
     )
@@ -442,7 +435,6 @@ async def cat_select(call: types.CallbackQuery):
     pending_category[uid] = key
     cat = CATEGORIES[key]
 
-    # если уже оплачено — даем писать ситуацию
     if is_paid(uid, key):
         await call.message.answer(
             f"Доступ активен: {cat['title']}\n\nНапиши ситуацию одним сообщением.",
@@ -450,10 +442,9 @@ async def cat_select(call: types.CallbackQuery):
         )
         return
 
-    # если оплата не настроена — сразу сообщаем
-    if not CARD_NUMBER or not CARD_HOLDER:
+    if not SBP_PHONE or not SBP_BANK or not SBP_HOLDER:
         await call.message.answer(
-            "Оплата не настроена админом (CARD_NUMBER/CARD_HOLDER).",
+            "Оплата по СБП не настроена (SBP_PHONE/SBP_BANK/SBP_HOLDER).",
             reply_markup=menu_kb
         )
         return
@@ -465,10 +456,7 @@ async def cat_select(call: types.CallbackQuery):
     await call.message.answer(
         f"Оплата: {cat['title']}\n\n"
         f"Точная сумма: {fmt_amount(amount_cents)} ₽\n\n"
-        "Карта:\n"
-        f"{card_text()}\n\n"
-        "Получатель:\n"
-        f"{CARD_HOLDER}\n\n"
+        f"{sbp_text()}\n\n"
         f"Код:\n{code}\n\n"
         "После перевода отправь одним сообщением:\n"
         "сумма + код\n"
@@ -495,7 +483,6 @@ async def all_text(message: types.Message):
         await message.answer("Время оплаты истекло. Выбери категорию заново.", reply_markup=menu_kb)
         return
 
-    # этап подтверждения оплаты
     if paid == 0:
         amt_in, code_in = parse_confirm(text)
         if amt_in is None or code_in is None:
@@ -509,7 +496,6 @@ async def all_text(message: types.Message):
         await message.answer("Оплата подтверждена ✅\n\nТеперь напиши ситуацию одним сообщением.", reply_markup=menu_kb)
         return
 
-    # генерация документа
     if len(text) < 15:
         await message.answer("Напиши чуть подробнее (2–3 предложения).", reply_markup=menu_kb)
         return
@@ -529,12 +515,11 @@ async def all_text(message: types.Message):
 
 
 # =========================
-# RUN (anti-conflict loop)
+# RUN
 # =========================
 async def main():
     db_init()
 
-    # на всякий случай удаляем webhook
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception:
@@ -544,7 +529,6 @@ async def main():
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
         except TelegramConflictError as e:
-            # обычно это значит, что где-то еще запущен polling/webhook
             print(f"TelegramConflictError: {e}")
             await asyncio.sleep(max(5.0, POLL_RESTART_DELAY_SEC))
         except Exception as e:

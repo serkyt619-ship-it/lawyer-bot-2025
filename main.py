@@ -5,7 +5,7 @@ import sqlite3
 import time
 import random
 from typing import Dict, Optional, Tuple
-
+from google import genai
 import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -21,9 +21,11 @@ from aiogram.exceptions import TelegramConflictError
 # =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 GEMINI_API_KEY = "AIzaSyBHsx7f2l-wUn_UFZ7oH_s5ZFtZWLSoXH0"
+GEMINI_MODEL = 
 # Gemini
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
+GEMINI_API_KEY = genai.Client(api_key="GEMINI_API_KEY")
+ # = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 # СБП реквизиты
 SBP_PHONE = os.environ.get("SBP_PHONE", "").strip()
@@ -67,6 +69,8 @@ CATEGORIES: Dict[str, Dict] = {
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 TIMEOUT = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SEC)
 RUNTIME_MODEL: Optional[str] = None
+
+
 
 
 # =========================
@@ -234,7 +238,7 @@ def pick_best_model(models: list) -> Optional[str]:
     candidates = []
     for m in models:
         name = m.get("name")
-        methods = m.get("supportedGenerationMethods", []) or []
+        methods = m.get("streamGenerateContent", []) or []
         if not name:
             continue
         if "generateContent" not in methods:
@@ -246,7 +250,7 @@ def pick_best_model(models: list) -> Optional[str]:
 
     def score(n: str) -> int:
         nlow = n.lower()
-        if "gemini-1.5-flash" in nlow:
+        if "gemini-2.5-flash" in nlow:
             return 300
         if "gemini-1.5-pro" in nlow:
             return 200

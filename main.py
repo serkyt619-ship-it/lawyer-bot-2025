@@ -5,7 +5,7 @@ import sqlite3
 import time
 import random
 from typing import Dict, Optional, Tuple
-from google import genai
+# from google import genai
 import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -21,10 +21,10 @@ from aiogram.exceptions import TelegramConflictError
 # =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 GEMINI_API_KEY = "AIzaSyBHsx7f2l-wUn_UFZ7oH_s5ZFtZWLSoXH0"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 # Gemini
-GEMINI_API_KEY = genai.Client(api_key="GEMINI_API_KEY")
- # = os.environ.get("GEMINI_API_KEY", "").strip()
+# GEMINI_API_KEY = genai.Client(api_key="GEMINI_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 # СБП реквизиты

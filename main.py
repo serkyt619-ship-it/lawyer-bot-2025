@@ -20,7 +20,7 @@ from aiogram.exceptions import TelegramConflictError
 # ENV (Railway Variables)
 # =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-
+GEMINI_API_KEY = "AIzaSyBHsx7f2l-wUn_UFZ7oH_s5ZFtZWLSoXH0"
 # Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
